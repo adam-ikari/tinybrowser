@@ -13,6 +13,11 @@ target_include_directories(test_deps_link PRIVATE ${TB_TEST_INCS})
 target_link_libraries(test_deps_link PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_deps_link)
 
+add_executable(test_clock unit/test_clock.cc)
+target_include_directories(test_clock PRIVATE ${TB_TEST_INCS})
+target_link_libraries(test_clock PRIVATE tinybrowser gtest_main)
+gtest_discover_tests(test_clock)
+
 if(TB_WITH_LIBCURL)
   add_executable(test_curl_link unit/test_curl_link.cc)
   target_include_directories(test_curl_link PRIVATE

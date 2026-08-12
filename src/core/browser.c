@@ -2,8 +2,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-const tb_clock tb_clock_real = { 0 };  /* Task 4 填充 */
-
 struct tb_browser {
   tb_config cfg;
   int initialized;
