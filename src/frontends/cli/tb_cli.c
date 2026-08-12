@@ -32,7 +32,7 @@ static char search_str[128];
 static int search_str_len;
 static int hint_n;            /* 进入 HINT 时的可点元素总数 */
 static int hint_elems[676];   /* 可点元素在 g_v 中的索引(序号 k → hint = tb_hint_keys(hint_n,k)) */
-static char hint_prefix[3];   /* 已输前缀(最长 2) */
+static char hint_prefix[3] = {0};   /* 已输前缀(最长 2,显式零初始化) */
 static int hint_prefix_len;
 
 static void enter_mode(int m);
@@ -237,6 +237,7 @@ static void enter_hint(void) {
   }
   if (hint_n == 0) return;   /* 无可点元素,无操作 */
   hint_prefix_len = 0;
+  hint_prefix[0] = '\0';   /* 清残留前缀,避免模式行显示陈旧字符 */
   mode = MODE_HINT;
 }
 
@@ -327,10 +328,11 @@ static void hint_key(struct tb_event *ev) {
   if (ev->key == TB_KEY_ESC) { enter_mode(MODE_BROWSE); return; }
   if (ev->key == TB_KEY_BACKSPACE || ev->key == TB_KEY_BACKSPACE2) {
     if (hint_prefix_len > 0) hint_prefix_len--;
+    hint_prefix[hint_prefix_len] = '\0';   /* 截短后补终止符,模式行不显示陈旧字符 */
     return;
   }
   if (ev->ch < 'a' || ev->ch > 'z') return;
-  char np[3]; int len = 0;
+  char np[4]; int len = 0;
   if (hint_prefix_len > 0) np[len++] = hint_prefix[0];
   if (hint_prefix_len > 1) np[len++] = hint_prefix[1];
   np[len++] = (char)ev->ch;
