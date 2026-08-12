@@ -103,6 +103,7 @@ struct tb_elem {
   int id;
   const char *type;   /* "link"|"button"|"input"|"select"|"form" */
   const char *text;
+  size_t off;         /* 元素文本在 v->text 中的起始字节偏移(vimium hint/鼠标命中用) */
   const char *href;   /* link */
   const char *name;   /* input/select */
   const char *value;  /* input 当前值 / select 已选项 */

@@ -64,6 +64,7 @@ static void add_elem(ctx_t *c, const char *type, tb_node *n) {
   c->elems = realloc(c->elems, (size_t)(c->nelems + 1) * sizeof(struct tb_elem));
   struct tb_elem *e = &c->elems[c->nelems++];
   memset(e, 0, sizeof *e);
+  e->off = c->len;   /* 元素文本起点 = 当前已写缓冲长度(文本尚未 push) */
   e->id = tb_dom_id(c->dom, n);
   e->type = type;
   /* 交互标签 = 后代文本;select/form 是容器,textContent 为选项/子元素拼接,无意义 */
@@ -174,7 +175,17 @@ tb_view *tb_render(tb_dom *dom, const char *url, int status) {
   size_t end = strlen(text);
   while (end > start && text[end - 1] == '\n') end--;
   text[end] = '\0';
-  if (start) memmove(text, text + start, end - start + 1);
+  if (start) {
+    memmove(text, text + start, end - start + 1);
+    size_t nl = end - start;   /* 裁剪后的文本长度 */
+    /* 正常内容下所有 off >= start(前导换行都位于首个内容之前)。但整页内容
+       为空/全换行时(如空 form),off < start,直接减会 size_t 下溢 —
+       此时元素文本已被裁掉,把 off 钳到 0。上界 nl 为防御性钳制。 */
+    for (int i = 0; i < c.nelems; i++) {
+      size_t o = c.elems[i].off >= start ? c.elems[i].off - start : 0;
+      c.elems[i].off = o > nl ? nl : o;
+    }
+  }
   v->text = text;
   v->elems = c.elems;
   v->nelems = c.nelems;

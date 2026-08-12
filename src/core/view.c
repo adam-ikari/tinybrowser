@@ -51,6 +51,7 @@ tb_view *tb_view_clone(const tb_view *v) {
       struct tb_elem *t = &c->elems[i];
       t->id = s->id;
       t->type = s->type;  /* type 是字符串字面量,不拥有 */
+      t->off = s->off;
       t->text = dup(s->text);
       t->href = dup(s->href);
       t->name = dup(s->name);
