@@ -23,7 +23,6 @@ tb_err tb_back(tb_browser *b) { (void)b; tb_err e = { TB_ERR_ARG, "" }; return e
 tb_err tb_forward(tb_browser *b) { (void)b; tb_err e = { TB_ERR_ARG, "" }; return e; }
 tb_err tb_reload(tb_browser *b) { (void)b; tb_err e = { TB_ERR_ARG, "" }; return e; }
 tb_err tb_observe(tb_browser *b, tb_view **out) { (void)b; (void)out; tb_err e = { TB_ERR_ARG, "" }; return e; }
-void tb_view_free(tb_view *v) { (void)v; }
 STUB2(tb_click)
 STUB2(tb_submit)
 tb_err tb_fill(tb_browser *b, int id, const char *value) { (void)b; (void)id; (void)value; tb_err e = { TB_ERR_ARG, "" }; return e; }

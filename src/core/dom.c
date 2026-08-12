@@ -47,6 +47,10 @@ tb_node *tb_dom_root(const tb_dom *d) {
     return (tb_node *)lxb_dom_document_root(lxb_dom_interface_document(d->doc));
 }
 
+tb_node *tb_dom_head(const tb_dom *d) {
+    return (tb_node *)lxb_html_document_head_element(d->doc);
+}
+
 tb_node *tb_dom_first_child(tb_node *n) {
     if (!n) return NULL;
     return (tb_node *)lxb_dom_node_first_child((lxb_dom_node_t *)n);

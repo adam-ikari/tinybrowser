@@ -14,6 +14,7 @@ tb_dom *tb_dom_parse(const char *html, size_t len);
 void tb_dom_free(tb_dom *d);
 
 tb_node *tb_dom_root(const tb_dom *d);
+tb_node *tb_dom_head(const tb_dom *d);
 tb_node *tb_dom_first_child(tb_node *n);
 tb_node *tb_dom_next_sibling(tb_node *n);
 

@@ -42,3 +42,8 @@ add_executable(test_dom unit/test_dom.cc)
 target_include_directories(test_dom PRIVATE ${TB_TEST_INCS})
 target_link_libraries(test_dom PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_dom)
+
+add_executable(test_render unit/test_render.cc)
+target_include_directories(test_render PRIVATE ${TB_TEST_INCS})
+target_link_libraries(test_render PRIVATE tinybrowser gtest_main)
+gtest_discover_tests(test_render)
