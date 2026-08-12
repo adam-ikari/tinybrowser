@@ -434,15 +434,15 @@ int main(int argc, char **argv) {
             (mode == MODE_BROWSE || mode == MODE_HINT)) {
           scroll_top += (ev.key == TB_KEY_MOUSE_WHEEL_DOWN) ? 1 : -1;   /* redraw 内钳制 */
         } else if (ev.key == TB_KEY_MOUSE_LEFT && mode == MODE_BROWSE && g_v) {
-          /* 点击底栏元素区 → 选中;再点已选中项 → 激活(现有逻辑保留) */
+          /* 点击底栏元素区(渲染行 [elem_top+1, h-3]) → 选中;再点已选中项 → 激活 */
           int nelems = tb_view_nelems(g_v);
           int elem_rows = nelems < 5 ? nelems : 5;
           int elem_top = tb_height() - 3 - elem_rows;
-          if (ev.y >= elem_top && ev.y < elem_top + elem_rows) {
-            int idx = ev.y - elem_top;
+          if (ev.y >= elem_top + 1 && ev.y <= elem_top + elem_rows) {
+            int idx = ev.y - (elem_top + 1);
             if (idx == focus) activate_focused();
             else focus = idx;
-          } else if (ev.y >= 2 && ev.y <= elem_top - 1) {
+          } else if (ev.y >= 2 && ev.y <= elem_top) {
             /* 正文点击命中:屏幕行列 → 文档行列 → 字节偏移 */
             int row = scroll_top + (ev.y - 2);
             const char *text = tb_view_text(g_v);
