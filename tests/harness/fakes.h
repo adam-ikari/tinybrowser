@@ -98,6 +98,7 @@ static void fake_cancel(const tb_transport *self, void *op) {
 static void fake_poll(const tb_transport *self) {
   fake_transport *ft = (fake_transport *)self;
   ft->poll_calls++;
+  ft->clock->now += 1;   /* 每次 poll 推进 1ms:让 grace/超时 逻辑在 pump 循环中收敛 */
   fake_op *op = ft->ops;
   while (op) {
     fake_op *next = op->next;

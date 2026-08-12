@@ -41,14 +41,13 @@ TEST(Transport, FakeDeliversInOrderAndDeferred) {
   req.ud = &s;
   void *op = ft.base.open(&ft.base, &req);
 
-  ft.base.poll(&ft.base);
+  // fake_poll 每次推进 1ms:open 于 t=1000000,delay=5 → t=1000005 到期。
+  ft.base.poll(&ft.base);          // now=1000001
   EXPECT_EQ(s.done, 0);            // 5ms 未到
-  fc.now += 4;
-  ft.base.poll(&ft.base);
+  for (int i = 0; i < 3; i++) ft.base.poll(&ft.base);  // now=1000004,仍未到
   EXPECT_EQ(s.done, 0);
-  fc.now += 1;
-  ft.base.poll(&ft.base);
-  EXPECT_EQ(s.done, 1);            // 到期后一次 poll 派发
+  ft.base.poll(&ft.base);          // now=1000005,到期→一次 poll 派发
+  EXPECT_EQ(s.done, 1);
   EXPECT_EQ(s.headers, 1);
   EXPECT_EQ(s.body, 1);
   ASSERT_NE(s.ct, nullptr);
