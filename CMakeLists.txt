@@ -104,7 +104,7 @@ if(TB_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
 
-if(TB_BUILD_CLI)
+if(TB_BUILD_CLI AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/frontends/cli/tb_cli.c)
   add_executable(tb frontends/cli/tb_cli.c)
   target_link_libraries(tb PRIVATE tinybrowser)
   target_include_directories(tb PRIVATE deps/termbox2)
