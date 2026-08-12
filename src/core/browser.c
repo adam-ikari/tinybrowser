@@ -1,10 +1,12 @@
 #include "tb.h"
 #include "content.h"
+#include "curl_transport.h"
 #include "dom.h"
 #include "render.h"
 #include "session.h"
 #include "url.h"
 #include "view.h"
+#include <uv.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +21,8 @@ struct tb_browser {
   const tb_transport *transport;
   fv_t fv[64];          /* 表单值(由 tb_fill/tb_select 写入),M1 固定槽 */
   int nfv;
+  uv_loop_t loop;
+  int loop_init;        /* 1 = 默认 curl transport + 自有 uv loop */
 };
 
 /* ---- 导航上下文:把传输回调桥接到浏览器状态 ---- */
@@ -339,10 +343,14 @@ tb_browser *tb_create(const tb_config *cfg) {
   if (!b->cfg.user_agent) b->cfg.user_agent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
   if (!b->cfg.clock) b->cfg.clock = &tb_clock_real;
   if (!b->cfg.transport) {
-    /* 真实 curl transport 在 Task 12 注入;此任务测试必须显式传 fake。 */
-    tb_err e = { TB_ERR_ARG, "no transport configured (Task 12 wires default)" };
-    free(b);
-    return NULL;
+    b->loop_init = uv_loop_init(&b->loop) == 0;
+    if (b->loop_init) {
+      b->cfg.transport = tb_curl_transport_create(&b->loop, &b->cfg);
+    } else {
+      tb_err e = { TB_ERR_NET, "uv_loop_init failed" };
+      free(b);
+      return NULL;
+    }
   }
   b->transport = b->cfg.transport;
   tb_session_init(&b->session, b->cfg.clock, b->cfg.idle_grace_ms);
@@ -351,6 +359,7 @@ tb_browser *tb_create(const tb_config *cfg) {
 
 void tb_destroy(tb_browser *b) {
   if (!b) return;
+  if (b->loop_init) uv_loop_close(&b->loop);
   tb_session_free(&b->session);
   tb_dom_free(b->dom);
   tb_view_free(b->view);
@@ -364,6 +373,7 @@ int tb_pump(tb_browser *b, uint32_t timeout_ms) {
   const tb_clock *clk = b->cfg.clock;
   uint64_t deadline = timeout_ms ? clk->now_ms(clk) + timeout_ms : 0;
   for (;;) {
+    if (b->loop_init) uv_run(&b->loop, UV_RUN_NOWAIT);
     b->transport->poll(b->transport);
     if (tb_session_idle(&b->session)) return 0;
     if (deadline && clk->now_ms(clk) >= deadline) return 1;

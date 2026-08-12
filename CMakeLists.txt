@@ -84,6 +84,8 @@ target_include_directories(tinybrowser PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/deps/lexbor/source
   ${CMAKE_CURRENT_SOURCE_DIR}/deps/libuv/include
   ${CMAKE_CURRENT_SOURCE_DIR}/deps/mbedtls/include
+  # 用自己的 libcurl 头(与 libcurl.a 同源,避免误用系统 OpenSSL 版头)。
+  ${CMAKE_CURRENT_SOURCE_DIR}/deps/libcurl/include
 )
 # mbedTLS provides three static libs: mbedtls / mbedx509 / mbedcrypto.
 # Use target names exposed by deps/mbedtls (canonical mbedtls 3.x names).

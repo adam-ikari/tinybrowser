@@ -62,3 +62,8 @@ add_executable(test_interact unit/test_interact.cc harness/fakes.c)
 target_include_directories(test_interact PRIVATE ${TB_TEST_INCS})
 target_link_libraries(test_interact PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_interact)
+
+add_executable(test_network unit/test_network.cc harness/http_server.cc)
+target_include_directories(test_network PRIVATE ${TB_TEST_INCS})
+target_link_libraries(test_network PRIVATE tinybrowser gtest_main)
+gtest_discover_tests(test_network)
