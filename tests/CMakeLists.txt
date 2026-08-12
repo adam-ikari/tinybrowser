@@ -75,3 +75,8 @@ target_include_directories(test_tls PRIVATE ${TB_TEST_INCS} ${CMAKE_CURRENT_SOUR
 target_compile_definitions(test_tls PRIVATE TB_TEST_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/")
 target_link_libraries(test_tls PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_tls)
+
+add_executable(golden_runner goldens/golden_runner.cc)
+target_include_directories(golden_runner PRIVATE ${TB_TEST_INCS})
+target_link_libraries(golden_runner PRIVATE tinybrowser)
+add_test(NAME golden COMMAND golden_runner ${CMAKE_SOURCE_DIR}/)

@@ -2731,7 +2731,7 @@ git commit -m "feat(m1): interaction — click/fill/select/submit with form enco
 - Consumes: `tb_transport`(1)、libuv + libcurl(2/3)。
 - Produces: 默认传输 `tb_curl_transport_create(uv_loop_t*, const tb_config*)`;`tb_create` 无显式 transport 时使用它;`tb_pump` 改为驱动 uv loop。
 
-- [ ] **Step 1: 写 curl+libuv 传输(标准 socket-action 集成)**
+- [x] **Step 1: 写 curl+libuv 传输(标准 socket-action 集成)**
 
 `src/core/curl_transport.c`:
 ```c
@@ -2949,7 +2949,7 @@ tb_transport *tb_curl_transport_create(uv_loop_t *loop, const tb_config *cfg) {
 
 > `CURLOPT_COPYPOSTFIELDS` 与 `CURLOPT_POSTFIELDS` 二选一即可(COPY 会自己拷贝,可省去生命周期问题);这里保留 POSTFIELDS+POSTFIELDSIZE 也可,但 req->body 生命周期由调用方(do_navigate 的 ctx)保证到 on_done 之后 —— 满足。为稳妥用 `CURLOPT_COPYPOSTFIELDS`。
 
-- [ ] **Step 2: browser.c 注入默认 transport 并驱动 uv loop**
+- [x] **Step 2: browser.c 注入默认 transport 并驱动 uv loop**
 
 在 `struct tb_browser` 追加 `uv_loop_t loop; int loop_init;`(include `<uv.h>`)。`tb_create` 中:
 ```c
@@ -2989,7 +2989,7 @@ tb_transport *tb_curl_transport_create(uv_loop_t *loop, const tb_config *cfg);
 #endif
 ```
 
-- [ ] **Step 3: 写内嵌测试 HTTP server**
+- [x] **Step 3: 写内嵌测试 HTTP server**
 
 `tests/harness/http_server.h`:
 ```cpp
@@ -3020,7 +3020,7 @@ private:
 ```
 > 实现要点:绑定 `127.0.0.1:0`(ephemeral),`getsockname` 取端口,`listen`,accept 循环逐连接解析 `GET <path> HTTP/1.1`(读到 `\r\n\r\n`),查表响应 `HTTP/1.1 <status>\r\nContent-Type: <ct>\r\nContent-Length: <n>\r\nConnection: close\r\n\r\n<body>`;未知路径 → 404。支持一个特殊路由 `"/redirect"` → 302 + `Location: /target`。请求计数供断言。server 析构时 close fd + join 线程。
 
-- [ ] **Step 4: 写集成测试(真实网络,回环)**
+- [x] **Step 4: 写集成测试(真实网络,回环)**
 
 `tests/unit/test_network.cc`:
 ```cpp
@@ -3086,12 +3086,12 @@ target_link_libraries(test_network PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_network)
 ```
 
-- [ ] **Step 5: 构建并跑**
+- [x] **Step 5: 构建并跑**
 
 Run: `make && make test`
 Expected: `test_network` PASS(真实 curl+libuv+lexbor 全链路)。若链接报 uv 缺失,在 `CMakeLists.txt` 给 `tinybrowser` 追加 `target_link_libraries(tinybrowser PRIVATE uv_a)`(add_subdirectory 已提供)。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add src/core/curl_transport.h src/core/curl_transport.c src/core/browser.c tests/harness/http_server.h tests/harness/http_server.cc tests/unit/test_network.cc tests/CMakeLists.txt CMakeLists.txt
@@ -3112,7 +3112,7 @@ git commit -m "feat(m1): real libcurl-multi+libuv transport with embedded HTTP t
 - Consumes: mbedtls(Task 2)、curl transport 的 `ca_bundle_path`(Task 12)。
 - Produces: `TlsServer` 测试类;验证 TLS1.2/1.3 握手 + HTTPS 抓取 + 无 OpenSSL 依赖。
 
-- [ ] **Step 1: 准备测试证书(零 openssl,复用 mbedtls 自带)**
+- [x] **Step 1: 准备测试证书(零 openssl,复用 mbedtls 自带)**
 
 ```bash
 mkdir -p tests/certs
@@ -3127,7 +3127,7 @@ cp deps/mbedtls/tests/data_files/test-ca2.crt tests/certs/ca.crt
 ```
 > 若 `server2` 的 CN 不是 `localhost` 或签名链不匹配,改选 `server1`/`test-ca1` 组合,并以测试能否通过为准。原则:证书只来自 mbedtls 仓库,运行时零 openssl。
 
-- [ ] **Step 2: 写 mbedtls TLS 测试服务器**
+- [x] **Step 2: 写 mbedtls TLS 测试服务器**
 
 `tests/harness/tls_server.h`:
 ```cpp
@@ -3158,7 +3158,7 @@ private:
 
 > 代码量约 120 行;若实现受挫,退路:在 `test_tls.cc` 里直接调 curl easy(经 `curl_transport` 同一栈)连 `https://localhost:<port>`,用 `CURLOPT_CAINFO` 指向 `ca.crt`。
 
-- [ ] **Step 3: 写测试**
+- [x] **Step 3: 写测试**
 
 `tests/unit/test_tls.cc`:
 ```cpp
@@ -3205,7 +3205,7 @@ TEST(Tls, RejectsUntrustedCA) {
 }
 ```
 
-- [ ] **Step 4: 构建并跑**
+- [x] **Step 4: 构建并跑**
 
 `tests/CMakeLists.txt`:
 ```cmake
@@ -3218,7 +3218,7 @@ gtest_discover_tests(test_tls)
 Run: `make && make test`
 Expected: `test_tls` 两个用例 PASS;`RejectsUntrustedCA` 语义为"证书不可信时不会成功渲染"(断言宽容,避免 CI 抖动)。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add tests/harness/tls_server.h tests/harness/tls_server.cc tests/unit/test_tls.cc tests/certs tests/CMakeLists.txt
@@ -3239,7 +3239,7 @@ git commit -m "feat(m1): TLS integration test — mbedtls test server + CAINFO-p
 - Consumes: `tb_dom_parse`(7)、`tb_render`(8)、`tb_view_dump`(8)。
 - Produces: 稳定、可 diff 的文本视图快照集;`-u` 一键再生成。
 
-- [ ] **Step 1: 写 fixtures**
+- [x] **Step 1: 写 fixtures**
 
 `tests/goldens/fixtures/hello.html`:
 ```html
@@ -3279,7 +3279,7 @@ git commit -m "feat(m1): TLS integration test — mbedtls test server + CAINFO-p
 </body></html>
 ```
 
-- [ ] **Step 2: 写 runner**
+- [x] **Step 2: 写 runner**
 
 `tests/goldens/golden_runner.cc`:
 ```cpp
@@ -3339,7 +3339,7 @@ int main(int argc, char **argv) {
 }
 ```
 
-- [ ] **Step 3: 首次生成 golden 并提交**
+- [x] **Step 3: 首次生成 golden 并提交**
 
 ```bash
 # 生成(先确保依赖已构建)
@@ -3348,7 +3348,7 @@ git add tests/goldens/goldens
 ```
 > 把生成的三个 `.golden` 提交入库。它们记录了"当前实现的行文规则"输出 —— 之后任何渲染行为变化都会在 ctest 里以 diff 形式暴露。
 
-- [ ] **Step 4: 注册到 ctest**
+- [x] **Step 4: 注册到 ctest**
 
 `tests/CMakeLists.txt`:
 ```cmake
@@ -3359,12 +3359,12 @@ add_test(NAME golden COMMAND golden_runner ${CMAKE_CURRENT_SOURCE_DIR})
 ```
 > 传 `SOURCE_DIR` 作参数,runner 用绝对路径拼 fixtures(把 `dir` 改为取 argv 提供的前缀)。
 
-- [ ] **Step 5: 构建并跑全套**
+- [x] **Step 5: 构建并跑全套**
 
 Run: `make && make test`
 Expected: 全部 gtest + `golden` 测试 PASS。故意改一行 `render.c` 的换行规则再跑,应看到 MISMATCH,再还原。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add tests/goldens tests/CMakeLists.txt

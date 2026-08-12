@@ -1,0 +1,12 @@
+URL: http://example.test/forms
+TITLE: Forms
+STATUS: 200
+TEXT:
+
+---
+ELEMS:
+id=1 type=form text="" href="" name="" value=""
+id=2 type=input text="" href="" name="user" value=""
+id=3 type=input text="" href="" name="pass" value=""
+id=4 type=select text="" href="" name="lang" value="" options="en|zh"
+id=5 type=button text="" href="" name="" value="Send"

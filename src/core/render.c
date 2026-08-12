@@ -133,6 +133,8 @@ tb_view *tb_render(tb_dom *dom, const char *url, int status) {
   c.cur_sel = -1;
   c.dom = dom;
   walk(&c, tb_dom_root(dom));
+  /* push() 从不写 NUL;不补终止符则下方 strlen 会越界读堆内存 */
+  if (c.buf) c.buf[c.len] = '\0';
   char *text = c.buf ? c.buf : strdup("");
   /* 首尾块标签会各产生一个换行,裁掉首尾空行 */
   size_t start = 0;

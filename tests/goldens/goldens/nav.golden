@@ -1,0 +1,14 @@
+URL: http://example.test/nav
+TITLE: Nav
+STATUS: 200
+TEXT:
+Alpha
+
+Beta
+
+Top
+---
+ELEMS:
+id=1 type=link text="" href="/a" name="" value=""
+id=2 type=link text="" href="/b" name="" value=""
+id=3 type=link text="" href="#top" name="" value=""

@@ -1,0 +1,18 @@
+URL: http://example.test/hello
+TITLE: Hello Page
+STATUS: 200
+TEXT:
+Welcome
+
+Hello world. 中文文本。
+
+About us
+
+
+Search
+---
+ELEMS:
+id=1 type=link text="" href="/about" name="" value=""
+id=2 type=form text="" href="" name="" value=""
+id=3 type=input text="" href="" name="q" value="cats"
+id=4 type=button text="" href="" name="" value=""
