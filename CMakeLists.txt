@@ -12,7 +12,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # sees source we own.
 option(TB_BUILD_TESTS "Build tests" ON)
 option(TB_BUILD_CLI   "Build tb CLI" ON)
-option(TB_WITH_LIBCURL "Build the libcurl-based transport (Task 3)" OFF)
+option(TB_WITH_LIBCURL "Build the libcurl-based transport (Task 3)" ON)
 
 # ---- vendored deps (all from deps/; no system packages) ----
 # lexbor: HTML/CSS/HTML parser
@@ -35,6 +35,39 @@ set(USE_SHARED_MBEDTLS_LIBRARY OFF CACHE BOOL "" FORCE)
 set(USE_STATIC_MBEDTLS_LIBRARY ON CACHE BOOL "" FORCE)
 add_subdirectory(deps/mbedtls)
 
+# ---- libcurl: isolated ExternalProject. mbedTLS is the ONLY TLS backend. ----
+if(TB_WITH_LIBCURL)
+  include(ExternalProject)
+  set(TB_CURL_BIN ${CMAKE_CURRENT_BINARY_DIR}/libcurl-prefix/src/libcurl-build)
+  set(MBEDTLS_SRC ${CMAKE_CURRENT_SOURCE_DIR}/deps/mbedtls)
+  set(MBEDTLS_BIN ${CMAKE_CURRENT_BINARY_DIR}/deps/mbedtls/library)
+  ExternalProject_Add(libcurl
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/deps/libcurl
+    CMAKE_ARGS
+      -DCMAKE_BUILD_TYPE=Release
+      -DBUILD_SHARED_LIBS=OFF
+      -DBUILD_CURL_EXE=OFF
+      -DBUILD_TESTING=OFF
+      -DHTTP_ONLY=ON
+      -DCURL_ZLIB=OFF -DCURL_BROTLI=OFF -DCURL_ZSTD=OFF
+      -DCURL_USE_LIBPSL=OFF -DCURL_USE_LIBSSH2=OFF
+      -DCURL_DISABLE_LDAP=ON -DCURL_DISABLE_LDAPS=ON
+      -DCMAKE_USE_MBEDTLS=ON
+      -DCURL_USE_MBEDTLS=ON
+      -DCURL_USE_OPENSSL=OFF
+      -DCMAKE_USE_OPENSSL=OFF
+      -DCMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE
+      -DUSE_NGHTTP2=OFF -DUSE_LIBIDN2=OFF
+      -DMBEDTLS_INCLUDE_DIR=${MBEDTLS_SRC}/include
+      -DMBEDTLS_LIBRARY=${MBEDTLS_BIN}/libmbedtls.a
+      -DMBEDX509_LIBRARY=${MBEDTLS_BIN}/libmbedx509.a
+      -DMBEDCRYPTO_LIBRARY=${MBEDTLS_BIN}/libmbedcrypto.a
+    INSTALL_COMMAND ""
+    BUILD_BYPRODUCTS ${TB_CURL_BIN}/lib/libcurl.a
+  )
+  add_dependencies(libcurl mbedtls mbedx509 mbedcrypto)
+endif()
+
 add_library(tinybrowser STATIC
   src/core/browser.c
   src/core/clock.c
@@ -54,7 +87,16 @@ target_include_directories(tinybrowser PUBLIC
 )
 # mbedTLS provides three static libs: mbedtls / mbedx509 / mbedcrypto.
 # Use target names exposed by deps/mbedtls (canonical mbedtls 3.x names).
-target_link_libraries(tinybrowser PUBLIC lexbor_static uv_a mbedtls mbedx509 mbedcrypto)
+# libcurl.a's objects reference mbedtls_* symbols, so it must appear BEFORE
+# the mbedTLS archives on consumers' link lines (static archive order).
+if(TB_WITH_LIBCURL)
+  add_dependencies(tinybrowser libcurl)
+  set(TB_LIBCURL ${TB_CURL_BIN}/lib/libcurl.a)
+else()
+  set(TB_LIBCURL "")
+endif()
+target_link_libraries(tinybrowser PUBLIC
+  ${TB_LIBCURL} lexbor_static uv_a mbedtls mbedx509 mbedcrypto)
 
 if(TB_BUILD_TESTS)
   enable_testing()

@@ -12,3 +12,13 @@ add_executable(test_deps_link unit/test_deps_link.cc)
 target_include_directories(test_deps_link PRIVATE ${TB_TEST_INCS})
 target_link_libraries(test_deps_link PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_deps_link)
+
+if(TB_WITH_LIBCURL)
+  add_executable(test_curl_link unit/test_curl_link.cc)
+  target_include_directories(test_curl_link PRIVATE
+    ${TB_TEST_INCS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../deps/libcurl/include
+  )
+  target_link_libraries(test_curl_link PRIVATE tinybrowser gtest_main)
+  gtest_discover_tests(test_curl_link)
+endif()
