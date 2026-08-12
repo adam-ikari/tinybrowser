@@ -1993,7 +1993,7 @@ git commit -m "feat(m1): session state machine — history, pending count, wait_
 - Consumes: `tb_transport`/`tb_clock`(4)、`tb_content_classify`(5)、`tb_dom`(7)、`tb_render`/`tb_view`(8)、`tb_session`(9)。
 - Produces: 完整的 `tb_create/tb_destroy/tb_navigate/tb_observe/tb_wait_idle/tb_pump` 真实现;导航回调(on_title/on_view_changed/on_error)在 poll 内同步触发。
 
-- [ ] **Step 1: 写 browser.c(核心 + 导航流程)**
+- [x] **Step 1: 写 browser.c(核心 + 导航流程)**
 
 `src/core/browser.c`(整文件替换 Task 1 桩):
 ```c
@@ -2180,7 +2180,7 @@ void tb_free(void *p) { free(p); }
 ```
 > 注意:`tb_create` 在无 transport 时返回 NULL(生产默认 transport 由 Task 12 接入)。Task 10-11 的所有测试显式传 fake transport。
 
-- [ ] **Step 2: 写测试(端到端,零网络)**
+- [x] **Step 2: 写测试(端到端,零网络)**
 
 `tests/unit/test_browser.cc`:
 ```cpp
@@ -2295,13 +2295,13 @@ TEST(Browser, WaitIdleHonorsGrace) {
 ```
 > `WaitIdleHonorsGrace` 验证的是:pending 结束(导航完成)后还要等 grace 300ms 才判空闲 —— fake 时钟由 fake poll 推进,循环自然进行。
 
-- [ ] **Step 3: 构建并跑**
+- [x] **Step 3: 构建并跑**
 
 `tests/CMakeLists.txt` 追加 `test_browser`。
 Run: `make test`
 Expected: `test_browser` 4 用例 PASS(包括 `NotRenderableContent` 用真实 PDF 字节,证明 body 不被解析)。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add src/core/browser.c tests/unit/test_browser.cc tests/CMakeLists.txt
@@ -2321,7 +2321,7 @@ git commit -m "feat(m1): browser core — navigate/observe/pump/wait_idle over t
 - Consumes: `tb_dom`(7)、`tb_session`(9)、`tb_url_resolve`/`tb_url_encode`(6)、fake transport(4)。
 - Produces: 真实现 `tb_back/tb_forward/tb_reload/tb_click/tb_fill/tb_select/tb_submit`;点击链接→解析相对 URL→导航;表单提交→收集命名控件→GET query / POST urlencoded body。
 
-- [ ] **Step 1: 实现交互(在 browser.c 追加)**
+- [x] **Step 1: 实现交互(在 browser.c 追加)**
 
 在 `src/core/browser.c` 顶部 include:
 ```c
@@ -2558,7 +2558,7 @@ tb_err tb_reload(tb_browser *b) {
 
 > 修正 `do_navigate` 签名:`static tb_err do_navigate(tb_browser *b, const char *url, const char *method, const char *body, const char *content_type, int replace)`;`tb_navigate`/`click`/`submit` 传 `replace=0`,`back/forward/reload` 传 `replace=1`。
 
-- [ ] **Step 2: 写测试**
+- [x] **Step 2: 写测试**
 
 `tests/unit/test_interact.cc`:
 ```cpp
@@ -2704,14 +2704,14 @@ TEST(Interact, BackForwardHistory) {
 ```
 > 说明:测试里的"找按钮/输入"用 `tb_view_elem` 的固定下标(元素表顺序 = DOM 遍历顺序,确定);`tb_submit` 由点击按钮触发。测试中 `PostSubmitSendsBody` 仅验证可提交不崩,POST body 断言由 `SelectThenSubmitIncludesOption` 覆盖(`lang=zh` 出现在 URL,因为简化实现把 POST body 记在 url 字段里?不 —— 该用例 assert 的是 `r.url.find("lang=zh")`,说明你要把 POST 的 body 断言改成检查 `r.body`。修正:把 `EXPECT_NE(r.url.find(...))` 改为 `EXPECT_NE(r.body.find("lang=zh"), std::string::npos)`。)
 
-- [ ] **Step 3: 调整 fakes.h 为可链接形态**
+- [x] **Step 3: 调整 fakes.h 为可链接形态**
 
 把 `tests/harness/fakes.h` 中的 `static` 函数实现移到 `tests/harness/fakes.c`(声明保留在头);在 `tests/CMakeLists.txt` 给 `test_browser`/`test_interact` 追加 `harness/fakes.c` 源。重建并跑。
 
 Run: `make test`
 Expected: `test_browser`(4)+ `test_interact`(5)全 PASS。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add src/core/browser.c tests/harness/fakes.h tests/harness/fakes.c tests/unit/test_interact.cc tests/unit/test_browser.cc tests/CMakeLists.txt

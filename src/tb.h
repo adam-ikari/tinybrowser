@@ -32,6 +32,7 @@ typedef struct tb_transport_req {
   const char *method;       /* "GET" | "POST" */
   const char *url;
   const char *body;         /* POST body,NULL 表示空 */
+  const char *content_type; /* 请求 Content-Type(表单 urlencoded 等),可 NULL */
   /* 响应回调:全部在宿主线程、poll 期间同步触发。
      本设计约定:on_headers/on_body/on_done 在同一瞬间(传输完成时)依次触发,
      M1 实现统一在完成点派发。 */
