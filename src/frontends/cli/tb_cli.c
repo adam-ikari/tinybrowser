@@ -430,8 +430,11 @@ int main(int argc, char **argv) {
         else browse_key(&ev);
         break;
       case TB_EVENT_MOUSE:
-        if (ev.key == TB_KEY_MOUSE_LEFT && mode == MODE_BROWSE && g_v) {
-          /* 点击底栏元素区 → 选中;再点已选中项 → 激活 */
+        if ((ev.key == TB_KEY_MOUSE_WHEEL_UP || ev.key == TB_KEY_MOUSE_WHEEL_DOWN) &&
+            (mode == MODE_BROWSE || mode == MODE_HINT)) {
+          scroll_top += (ev.key == TB_KEY_MOUSE_WHEEL_DOWN) ? 1 : -1;   /* redraw 内钳制 */
+        } else if (ev.key == TB_KEY_MOUSE_LEFT && mode == MODE_BROWSE && g_v) {
+          /* 点击底栏元素区 → 选中;再点已选中项 → 激活(现有逻辑保留) */
           int nelems = tb_view_nelems(g_v);
           int elem_rows = nelems < 5 ? nelems : 5;
           int elem_top = tb_height() - 3 - elem_rows;
@@ -439,6 +442,25 @@ int main(int argc, char **argv) {
             int idx = ev.y - elem_top;
             if (idx == focus) activate_focused();
             else focus = idx;
+          } else if (ev.y >= 2 && ev.y <= elem_top - 1) {
+            /* 正文点击命中:屏幕行列 → 文档行列 → 字节偏移 */
+            int row = scroll_top + (ev.y - 2);
+            const char *text = tb_view_text(g_v);
+            size_t pos = tb_pos_to_off(text, row, ev.x);
+            int hit = -1;
+            for (int i = 0; i < nelems; i++) {
+              struct tb_elem e;
+              if (tb_view_elem(g_v, i, &e)) continue;
+              const char *t = e.type;
+              if (strcmp(t, "link") != 0 && strcmp(t, "button") != 0 &&
+                  strcmp(t, "input") != 0) continue;
+              int erow;
+              tb_off_to_pos(text, e.off, &erow, NULL);
+              if (erow != row) continue;
+              size_t elen = e.text ? strlen(e.text) : 0;
+              if (e.off <= pos && pos < e.off + elen) { hit = i; break; }
+            }
+            if (hit >= 0) activate_elem(hit);
           }
         }
         break;
