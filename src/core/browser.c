@@ -210,6 +210,16 @@ tb_err tb_click(tb_browser *b, int id) {
     if (!form) { tb_err e = { TB_ERR_NO_ELEM, "button not in form" }; return e; }
     return tb_submit(b, tb_dom_id(b->dom, form));
   }
+  /* render 层把 input[type=submit|button|reset] 归为 "button",这里对齐 */
+  if (strcmp(tag, "input") == 0) {
+    const char *itype = tb_dom_attr(n, "type");
+    if (itype && (strcmp(itype, "submit") == 0 || strcmp(itype, "button") == 0 ||
+                  strcmp(itype, "reset") == 0)) {
+      tb_node *form = find_containing_form(b, n);
+      if (!form) { tb_err e = { TB_ERR_NO_ELEM, "button not in form" }; return e; }
+      return tb_submit(b, tb_dom_id(b->dom, form));
+    }
+  }
   tb_err e = { TB_ERR_ARG, "element not clickable" };
   return e;
 }

@@ -12,7 +12,7 @@ About us
 Search
 ---
 ELEMS:
-id=1 type=link text="" href="/about" name="" value=""
+id=1 type=link text="About us" href="/about" name="" value=""
 id=2 type=form text="" href="" name="" value=""
 id=3 type=input text="" href="" name="q" value="cats"
-id=4 type=button text="" href="" name="" value=""
+id=4 type=button text="Search" href="" name="" value=""

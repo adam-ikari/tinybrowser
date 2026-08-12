@@ -9,6 +9,6 @@ Beta
 Top
 ---
 ELEMS:
-id=1 type=link text="" href="/a" name="" value=""
-id=2 type=link text="" href="/b" name="" value=""
-id=3 type=link text="" href="#top" name="" value=""
+id=1 type=link text="Alpha" href="/a" name="" value=""
+id=2 type=link text="Beta" href="/b" name="" value=""
+id=3 type=link text="Top" href="#top" name="" value=""

@@ -39,13 +39,45 @@ static void append_opt(ctx_t *c, struct tb_elem *e, const char *s) {
   e->options[e->noptions++] = strdup(s ? s : "");
 }
 
+/* 元素 textContent:收集全部后代文本节点(用于底栏交互标签) */
+static size_t elem_text(tb_node *n, char *buf, size_t cap) {
+  if (!n || cap < 2) return 0;
+  if (!tb_dom_is_element(n)) {
+    const char *t = tb_dom_text(n);
+    size_t l = t ? strlen(t) : 0;
+    size_t w = l < cap - 1 ? l : cap - 1;
+    memcpy(buf, t, w);
+    buf[w] = '\0';
+    return w;
+  }
+  size_t off = 0;
+  tb_node *ch = tb_dom_first_child(n);
+  while (ch) {
+    if (off < cap - 1) off += elem_text(ch, buf + off, cap - off);
+    ch = tb_dom_next_sibling(ch);
+  }
+  buf[off] = '\0';
+  return off;
+}
+
 static void add_elem(ctx_t *c, const char *type, tb_node *n) {
   c->elems = realloc(c->elems, (size_t)(c->nelems + 1) * sizeof(struct tb_elem));
   struct tb_elem *e = &c->elems[c->nelems++];
   memset(e, 0, sizeof *e);
   e->id = tb_dom_id(c->dom, n);
   e->type = type;
-  e->text = strdup(tb_dom_text(n) ? tb_dom_text(n) : "");
+  /* 交互标签 = 后代文本;select/form 是容器,textContent 为选项/子元素拼接,无意义 */
+  if (strcmp(type, "select") == 0 || strcmp(type, "form") == 0) {
+    e->text = strdup("");
+  } else {
+    char tbuf[512];
+    size_t nlen = elem_text(n, tbuf, sizeof tbuf);
+    char *s = tbuf, *p = tbuf + nlen;
+    while (s < p && isspace((unsigned char)*s)) s++;
+    while (p > s && isspace((unsigned char)p[-1])) p--;
+    *p = '\0';
+    e->text = strdup(s);
+  }
   e->href = strdup(tb_dom_attr(n, "href") ? tb_dom_attr(n, "href") : "");
   e->name = strdup(tb_dom_attr(n, "name") ? tb_dom_attr(n, "name") : "");
   e->value = strdup(tb_dom_attr(n, "value") ? tb_dom_attr(n, "value") : "");
