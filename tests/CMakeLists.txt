@@ -47,3 +47,8 @@ add_executable(test_render unit/test_render.cc)
 target_include_directories(test_render PRIVATE ${TB_TEST_INCS})
 target_link_libraries(test_render PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_render)
+
+add_executable(test_session unit/test_session.cc)
+target_include_directories(test_session PRIVATE ${TB_TEST_INCS})
+target_link_libraries(test_session PRIVATE tinybrowser gtest_main)
+gtest_discover_tests(test_session)
