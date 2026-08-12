@@ -88,3 +88,8 @@ target_include_directories(test_render_coord PRIVATE ${TB_TEST_INCS})
 target_compile_definitions(test_render_coord PRIVATE TB_TEST_SRC_DIR="${CMAKE_SOURCE_DIR}/")
 target_link_libraries(test_render_coord PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_render_coord)
+
+add_executable(test_hint unit/test_hint.cc)
+target_include_directories(test_hint PRIVATE ${TB_TEST_INCS})
+target_link_libraries(test_hint PRIVATE tinybrowser gtest_main)
+gtest_discover_tests(test_hint)

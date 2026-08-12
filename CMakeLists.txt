@@ -76,6 +76,7 @@ add_library(tinybrowser STATIC
   src/core/dom.c
   src/core/view.c
   src/core/render.c
+  src/core/hint.c
   src/core/session.c
   src/core/curl_transport.c
 )
