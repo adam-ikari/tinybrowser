@@ -67,3 +67,11 @@ add_executable(test_network unit/test_network.cc harness/http_server.cc)
 target_include_directories(test_network PRIVATE ${TB_TEST_INCS})
 target_link_libraries(test_network PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_network)
+
+# 不显式列出 mbedtls:tinybrowser 已 PUBLIC 链接(顺序 curl→mbedtls,静态库单向解析),
+# 显式列出会让 mbedtls 提前到 libcurl 前面导致未定义符号。
+add_executable(test_tls unit/test_tls.cc harness/tls_server.cc)
+target_include_directories(test_tls PRIVATE ${TB_TEST_INCS} ${CMAKE_CURRENT_SOURCE_DIR}/../deps/mbedtls/include)
+target_compile_definitions(test_tls PRIVATE TB_TEST_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/")
+target_link_libraries(test_tls PRIVATE tinybrowser gtest_main)
+gtest_discover_tests(test_tls)
