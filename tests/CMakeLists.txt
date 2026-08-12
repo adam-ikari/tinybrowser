@@ -1,7 +1,7 @@
 include(GoogleTest)
 # 每个测试一个可执行;源文件在本计划后续任务逐个创建。
 # 公共配置:src 头 + harness;链接 tinybrowser + gtest_main。
-set(TB_TEST_INCS ${CMAKE_CURRENT_SOURCE_DIR}/../src ${CMAKE_CURRENT_SOURCE_DIR}/harness)
+set(TB_TEST_INCS ${CMAKE_CURRENT_SOURCE_DIR}/../src ${CMAKE_CURRENT_SOURCE_DIR}/../src/core ${CMAKE_CURRENT_SOURCE_DIR}/harness)
 
 add_executable(test_smoke unit/test_smoke.cc)
 target_include_directories(test_smoke PRIVATE ${TB_TEST_INCS})
@@ -27,3 +27,8 @@ if(TB_WITH_LIBCURL)
   target_link_libraries(test_curl_link PRIVATE tinybrowser gtest_main)
   gtest_discover_tests(test_curl_link)
 endif()
+
+add_executable(test_content unit/test_content.cc)
+target_include_directories(test_content PRIVATE ${TB_TEST_INCS})
+target_link_libraries(test_content PRIVATE tinybrowser gtest_main)
+gtest_discover_tests(test_content)
