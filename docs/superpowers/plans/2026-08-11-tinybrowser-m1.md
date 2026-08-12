@@ -72,7 +72,7 @@ tests/
 - Consumes: 无(绿地)。
 - Produces: `tb.h` 的公共 API 签名(后续所有任务依赖);构建入口 `make` / `make test` / `make clean` / `make init`。
 
-- [ ] **Step 1: 写公共头 `src/tb.h`(M1 完整形态,后续任务引用这些精确签名)**
+- [x] **Step 1: 写公共头 `src/tb.h`(M1 完整形态,后续任务引用这些精确签名)**
 
 ```c
 #ifndef TB_H
@@ -199,7 +199,7 @@ struct tb_elem {
 #endif /* TB_H */
 ```
 
-- [ ] **Step 2: 写最小实现 + 冒烟测试**
+- [x] **Step 2: 写最小实现 + 冒烟测试**
 
 `src/core/browser.c`(M1 最小占位,后续任务填充):
 ```c
@@ -256,7 +256,7 @@ TEST(Smoke, HeaderIsCppSafe) {
 }
 ```
 
-- [ ] **Step 3: 写 CMake 与 Makefile**
+- [x] **Step 3: 写 CMake 与 Makefile**
 
 `CMakeLists.txt`:
 ```cmake
@@ -343,17 +343,17 @@ clean:
 /* placeholder — filled in later tasks */
 ```
 
-- [ ] **Step 4: 冒烟构建**
+- [x] **Step 4: 冒烟构建**
 
 Run: `make`
 Expected: 配置、编译通过;`build/libtinybrowser.a` 与 `build/tb` 生成(此时 `browser.c` 里 `tb_view_free` 等为桩,仍可链接)。
 
-- [ ] **Step 5: 跑冒烟测试**
+- [x] **Step 5: 跑冒烟测试**
 
 Run: `make test`
 Expected: `test_smoke` 2 个用例 PASS;ctest 退出码 0。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add CMakeLists.txt Makefile .gitignore src/tb.h src/core tests/CMakeLists.txt tests/unit/test_smoke.cc
@@ -373,7 +373,7 @@ git commit -m "feat(m1): project skeleton, C99 build system, gtest smoke test"
 - Consumes: Task 1 的 CMake 结构。
 - Produces: 构建产物 `uv_a`(libuv 静态)、`mbedtls`/`mbedx509`/`mbedcrypto`、`lexbor_static`、`gtest`/`gtest_main`。
 
-- [ ] **Step 1: 添加四个 submodule**
+- [x] **Step 1: 添加四个 submodule**
 
 ```bash
 git submodule add https://github.com/google/googletest.git deps/googletest
@@ -383,7 +383,7 @@ git submodule add https://github.com/lexbor/lexbor.git deps/lexbor
 git submodule add https://github.com/termbox/termbox2.git deps/termbox2
 ```
 
-- [ ] **Step 2: 钉住稳定版本并记录**
+- [x] **Step 2: 钉住稳定版本并记录**
 
 ```bash
 # 在每个 deps/<name> 里 checkout 最新稳定 release tag(以仓库实际 tag 为准),
@@ -406,7 +406,7 @@ git add .gitmodules deps && git commit -m "chore(deps): vendor libuv/mbedtls/lex
 - libcurl:    <tag/commit>   (added in Task 3)
 ```
 
-- [ ] **Step 3: CMake 集成(add_subdirectory)**
+- [x] **Step 3: CMake 集成(add_subdirectory)**
 
 在 `CMakeLists.txt` 的 `add_library(tinybrowser ...)` 之前插入:
 ```cmake
@@ -442,7 +442,7 @@ target_link_libraries(tinybrowser PRIVATE
 ```
 (若 mbedtls 3.6 静态库目标名不同,用 `cmake --build build --target help | grep mbed` 校正;链接列表按实际目标名。)
 
-- [ ] **Step 4: 写链接冒烟测试**
+- [x] **Step 4: 写链接冒烟测试**
 
 `tests/unit/test_deps_link.cc`:
 ```cpp
@@ -478,17 +478,17 @@ target_link_libraries(test_deps_link PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_deps_link)
 ```
 
-- [ ] **Step 5: 构建并验证链接**
+- [x] **Step 5: 构建并验证链接**
 
 Run: `make`
 Expected: 四个依赖子项目 configure + 编译通过;`test_deps_link` 链接成功。若 lexbor 头路径或目标名报错,按错误修正(lexbor 头在 `deps/lexbor/source`)。
 
-- [ ] **Step 6: 跑测试**
+- [x] **Step 6: 跑测试**
 
 Run: `make test`
 Expected: `test_smoke` + `test_deps_link` 全 PASS。
 
-- [ ] **Step 7: 提交**
+- [x] **Step 7: 提交**
 
 ```bash
 git add CMakeLists.txt tests/CMakeLists.txt tests/unit/test_deps_link.cc deps/VERSIONS.md
@@ -508,7 +508,7 @@ git commit -m "feat(m1): vendor and build libuv/mbedtls/lexbor/googletest via su
 - Consumes: Task 2 的 mbedtls 目标。
 - Produces: `libcurl` 目标(独立 CMake 工程构建的静态库,链接路径 `${TB_CURL_BIN}/lib/libcurl.a`)。
 
-- [ ] **Step 1: 添加 curl submodule + 钉版本**
+- [x] **Step 1: 添加 curl submodule + 钉版本**
 
 ```bash
 git submodule add https://github.com/curl/curl.git deps/libcurl
@@ -516,7 +516,7 @@ cd deps/libcurl && git checkout <latest-stable-8.x-tag> && cd ../..
 ```
 > 必须 ≥ 8.0(将来 M2 用 curl 原生 WebSocket API)。记录到 `deps/VERSIONS.md`。
 
-- [ ] **Step 2: CMake 用 ExternalProject 独立构建 curl**
+- [x] **Step 2: CMake 用 ExternalProject 独立构建 curl**
 
 在 `add_library(tinybrowser ...)` 之前插入:
 ```cmake
@@ -555,7 +555,7 @@ add_dependencies(tinybrowser libcurl)
 target_link_libraries(tinybrowser PRIVATE ${TB_CURL_BIN}/lib/libcurl.a)
 ```
 
-- [ ] **Step 3: 写链接/后端验证测试**
+- [x] **Step 3: 写链接/后端验证测试**
 
 `tests/unit/test_curl_link.cc`:
 ```cpp
@@ -585,7 +585,7 @@ target_link_libraries(test_curl_link PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_curl_link)
 ```
 
-- [ ] **Step 4: 构建并验证无 OpenSSL**
+- [x] **Step 4: 构建并验证无 OpenSSL**
 
 Run: `make`
 Expected: 编译通过。然后验证后端:
@@ -595,12 +595,12 @@ strings build/libcurl-prefix/src/libcurl-build/lib/libcurl.a | grep -ci openssl
 ```
 Expected: 测试输出 "mbedTLS/x.y.z";`strings | grep -ci openssl` 输出 `0`。
 
-- [ ] **Step 5: 跑全套测试**
+- [x] **Step 5: 跑全套测试**
 
 Run: `make test`
 Expected: 全 PASS。
 
-- [ ] **Step 6: 提交**
+- [x] **Step 6: 提交**
 
 ```bash
 git add .gitmodules CMakeLists.txt tests/CMakeLists.txt tests/unit/test_curl_link.cc deps/VERSIONS.md
@@ -620,7 +620,7 @@ git commit -m "feat(m1): build libcurl via ExternalProject with mbedTLS-only TLS
 - Consumes: `tb_clock`/`tb_transport`(Task 1 定义)。
 - Produces: `tb_clock_real` 的真实现;`fake_clock`、`fake_transport` 测试工具(后续 Task 9-11 全部使用)。
 
-- [ ] **Step 1: 写真实时钟实现**
+- [x] **Step 1: 写真实时钟实现**
 
 `src/core/clock.c`(替换 Task 1 占位):
 ```c
@@ -638,7 +638,7 @@ const tb_clock tb_clock_real = { real_now_ms };
 ```
 (`clock_gettime` 需链接 `-lrt`?现代 glibc ≥2.17 无需。若链接报 `clock_gettime` 未定义,在 `CMakeLists.txt` 给 `tinybrowser` 加 `target_link_libraries(tinybrowser PRIVATE rt)`。)
 
-- [ ] **Step 2: 写 fake clock / fake transport 头**
+- [x] **Step 2: 写 fake clock / fake transport 头**
 
 `tests/harness/fakes.h`(供所有测试 include,不参与产品构建):
 ```c
@@ -755,7 +755,7 @@ static void fake_transport_init(fake_transport *ft, fake_clock *fc) {
 #endif
 ```
 
-- [ ] **Step 3: 写测试**
+- [x] **Step 3: 写测试**
 
 `tests/unit/test_clock.cc`:
 ```cpp
@@ -834,7 +834,7 @@ TEST(Transport, FakeErrorInjection) {
 }
 ```
 
-- [ ] **Step 4: 构建测试并跑**
+- [x] **Step 4: 构建测试并跑**
 
 `tests/CMakeLists.txt` 追加:
 ```cmake
@@ -846,7 +846,7 @@ gtest_discover_tests(test_clock)
 Run: `make test`
 Expected: `test_clock` 4 个用例 PASS。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/core/clock.c tests/harness/fakes.h tests/unit/test_clock.cc tests/CMakeLists.txt
@@ -865,7 +865,7 @@ git commit -m "feat(m1): real monotonic clock + fake transport/clock test seams"
 - Consumes: 无(纯 C 字符串)。
 - Produces: `tb_content_classify(const char *content_type, int attachment) -> tb_content_kind`;`tb_content_normalize(const char*) -> const char*`(返回静态规范化后的类型,或 NULL)。
 
-- [ ] **Step 1: 写头与实现**
+- [x] **Step 1: 写头与实现**
 
 `src/core/content.h`:
 ```c
@@ -913,7 +913,7 @@ tb_content_kind tb_content_classify(const char *content_type, int attachment) {
 }
 ```
 
-- [ ] **Step 2: 写测试**
+- [x] **Step 2: 写测试**
 
 `tests/unit/test_content.cc`:
 ```cpp
@@ -952,13 +952,13 @@ TEST(Content, NormalizeStripsParams) {
 }
 ```
 
-- [ ] **Step 3: 构建并跑**
+- [x] **Step 3: 构建并跑**
 
 `tests/CMakeLists.txt` 追加 `test_content`(模式同 test_clock);`CMakeLists.txt` 的 `tinybrowser` 源列表已含 `content.c`。
 Run: `make test`
 Expected: `test_content` 全 PASS。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add src/core/content.h src/core/content.c tests/unit/test_content.cc tests/CMakeLists.txt
@@ -977,7 +977,7 @@ git commit -m "feat(m1): content-type dispatch (renderable vs not-renderable)"
 - Consumes: 无。
 - Produces: `char *tb_url_resolve(const char *base, const char *ref)`(malloc,调用方 `tb_free`);`char *tb_url_encode(const char *s)`(malloc,表单 urlencode)。
 
-- [ ] **Step 1: 写头与实现(RFC3986 相对解析子集)**
+- [x] **Step 1: 写头与实现(RFC3986 相对解析子集)**
 
 `src/core/url.h`:
 ```c
@@ -1100,7 +1100,7 @@ char *tb_url_encode(const char *s) {
 }
 ```
 
-- [ ] **Step 2: 写测试**
+- [x] **Step 2: 写测试**
 
 `tests/unit/test_url.cc`:
 ```cpp
@@ -1146,13 +1146,13 @@ TEST(Url, Encode) {
 }
 ```
 
-- [ ] **Step 3: 构建并跑**
+- [x] **Step 3: 构建并跑**
 
 `tests/CMakeLists.txt` 追加 `test_url`;`CMakeLists.txt` 源列表已含 `url.c`。
 Run: `make test`
 Expected: `test_url` 全 PASS(含 `../d` 原样保留的用例,如实记录当前行为)。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add src/core/url.h src/core/url.c tests/unit/test_url.cc tests/CMakeLists.txt
@@ -1179,7 +1179,7 @@ git commit -m "feat(m1): RFC3986 relative URL resolution subset + form urlencodi
   - `const char *tb_dom_text(tb_node*)`(文本节点内容,非文本节点 NULL)
   - `int tb_dom_id(tb_dom*, tb_node*)`(首次调用分配,之后稳定返回;绑定节点身份)
 
-- [ ] **Step 1: 写头**
+- [x] **Step 1: 写头**
 
 `src/core/dom.h`:
 ```c
@@ -1204,7 +1204,7 @@ int tb_dom_id(tb_dom *d, tb_node *n);
 #endif
 ```
 
-- [ ] **Step 2: 写实现(含 ID 映射)**
+- [x] **Step 2: 写实现(含 ID 映射)**
 
 `src/core/dom.c`:
 ```c
@@ -1305,7 +1305,7 @@ int tb_dom_id(tb_dom *d, tb_node *n) {
 ```
 > `lxb_dom_attr_value` 返回 `lxb_dom_attr_value_t*`;若你钉住的 lexbor 版本此类型字段不同(见 `deps/lexbor/source/lexbor/dom/interfaces/attr.h`),以实际字段访问(`.data` / `.length`),或改用 `lxb_dom_element_text_content`。
 
-- [ ] **Step 3: 写测试**
+- [x] **Step 3: 写测试**
 
 `tests/unit/test_dom.cc`:
 ```cpp
@@ -1367,13 +1367,13 @@ TEST(Dom, IdsIndependentAcrossDocuments) {
 }
 ```
 
-- [ ] **Step 4: 构建并跑**
+- [x] **Step 4: 构建并跑**
 
 `tests/CMakeLists.txt` 追加 `test_dom`;`CMakeLists.txt` 源列表已含 `dom.c`。
 Run: `make test`
 Expected: `test_dom` 全 PASS。若 `lxb_dom_attr_value` 字段不符,按 Step 2 注修正后重跑。
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/core/dom.h src/core/dom.c tests/unit/test_dom.cc tests/CMakeLists.txt
