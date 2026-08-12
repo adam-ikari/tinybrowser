@@ -3384,7 +3384,7 @@ git commit -m "test(m1): golden text-view snapshots with -u regeneration"
 - Consumes: 公共 API(Task 10-11)、termbox2(单头 `deps/termbox2/termbox2.h`)。
 - Produces: `tb` 可执行(可交互文本浏览器)。
 
-- [ ] **Step 1: 写 TUI**
+- [x] **Step 1: 写 TUI**
 
 `frontends/cli/tb_cli.c`:
 ```c
@@ -3499,18 +3499,18 @@ int main(int argc, char **argv) {
 ```
 > 功能集刻意最小(Tab 选元素 + Enter 触发 link/button),填表/select 后续里程碑加;核心渲染/导航逻辑已被上层单测覆盖,TUI 只是薄壳。
 
-- [ ] **Step 2: 构建**
+- [x] **Step 2: 构建**
 
 Run: `make`
 Expected: `build/tb` 生成(termbox2 单头 `TB_IMPL` 编译进可执行,零额外依赖)。
 
-- [ ] **Step 3: 手工冒烟**
+- [x] **Step 3: 手工冒烟**
 
 Run:`./build/tb http://example.com/`(有网)或先 `./build/tb http://127.0.0.1:<HttpServer-port>/`(本地起一个临时服务器)。
 Expected: 显示 URL/status/title + 正文文本 + 底部元素表;Tab 高亮元素,Enter 跳转,Ctrl+Q 退出。终端恢复干净。
 > 若终端出现双宽字符错位:确认 locale 为 UTF-8(`export LC_ALL=C.UTF-8`);termbox2 对 CJK 按 wcwidth 处理。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add frontends/cli/tb_cli.c CMakeLists.txt
@@ -3525,7 +3525,7 @@ git commit -m "feat(m1): tb TUI frontend on termbox2"
 - Modify: `Makefile`、`README.md`(创建)
 - Test: 全套
 
-- [ ] **Step 1: Makefile 对齐最终目标**
+- [x] **Step 1: Makefile 对齐最终目标**
 
 `Makefile` 增加 `cli` 目标与 `VERSIONS` 提示:
 ```make
@@ -3536,7 +3536,7 @@ cli:
 ```
 其余保持 Task 1。
 
-- [ ] **Step 2: 写 README(构建/测试/用法)**
+- [x] **Step 2: 写 README(构建/测试/用法)**
 
 `README.md`:
 ```markdown
@@ -3562,12 +3562,12 @@ cli:
 M1 文本内核(本计划完成)→ M2 JS 运行时 → M3 MCP → M4 硬化 → M5 CDP。
 ```
 
-- [ ] **Step 3: 全量验证**
+- [x] **Step 3: 全量验证**
 
 Run:`make && make test`
 Expected: 全部测试 PASS(含 golden)。`ctest --test-dir build --output-on-failure` 输出 0 失败。
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git add Makefile README.md
