@@ -99,3 +99,14 @@ add_executable(test_qjs_embed unit/test_qjs_embed.cc)
 target_include_directories(test_qjs_embed PRIVATE ${TB_TEST_INCS} ${CMAKE_CURRENT_SOURCE_DIR}/../deps/quickjs-ng)
 target_link_libraries(test_qjs_embed PRIVATE tinybrowser qjs gtest_main)
 gtest_discover_tests(test_qjs_embed)
+
+# 纯 JS 单测:parser.js tokenizer。qjs 二进制 OUTPUT_NAME=qjs,目标名 qjs_exe。
+# quickjs-ng 移除全局 load(移入 std.loadScript,需 --std),
+# 故经 bootstrap.js 垫片还原 load 并预载 parser.js 暴露 _tb_parser。
+# 默认构建也带出 qjs_exe(quickjs-ng EXCLUDE_FROM_ALL,不会自动构建)。
+add_custom_target(tb_js_runner ALL DEPENDS qjs_exe)
+add_test(NAME js_parser
+  COMMAND $<TARGET_FILE:qjs_exe> --std -I ${CMAKE_CURRENT_SOURCE_DIR}/js/lib/bootstrap.js
+          ${CMAKE_CURRENT_SOURCE_DIR}/js/parser.test.js)
+# bootstrap/testlib 用相对路径 load,须以仓库根为工作目录
+set_tests_properties(js_parser PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
