@@ -15,6 +15,12 @@ option(TB_BUILD_CLI   "Build tb CLI" ON)
 option(TB_WITH_LIBCURL "Build the libcurl-based transport (Task 3)" ON)
 
 # ---- vendored deps (all from deps/; no system packages) ----
+# quickjs-ng: JS 引擎(M2a,替代 lexbor)。EXCLUDE_FROM_ALL 避免无条件构建
+# 其 CLI/test exe;qjs 静态库由 tinybrowser 依赖拉取构建。
+set(QJS_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(QJS_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+add_subdirectory(deps/quickjs-ng EXCLUDE_FROM_ALL)
+
 # lexbor: HTML/CSS/HTML parser
 set(LEXBOR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LEXBOR_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -99,7 +105,15 @@ else()
   set(TB_LIBCURL "")
 endif()
 target_link_libraries(tinybrowser PUBLIC
-  ${TB_LIBCURL} lexbor_static uv_a mbedtls mbedx509 mbedcrypto)
+  ${TB_LIBCURL} lexbor_static uv_a mbedtls mbedx509 mbedcrypto qjs)
+
+# ---- JS builtins 注入:src/js/*.js → js_builtins.inc(Task 2-4 填充内容) ----
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_js.cmake)
+set(TB_JS_BUILTINS ${CMAKE_CURRENT_BINARY_DIR}/src/core/js_builtins.inc)
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/src/core)
+tb_embed_js(${CMAKE_CURRENT_SOURCE_DIR}/src/js ${TB_JS_BUILTINS})
+add_custom_target(tb_js_builtins ALL DEPENDS ${TB_JS_BUILTINS})
+add_dependencies(tinybrowser tb_js_builtins)
 
 if(TB_BUILD_TESTS)
   enable_testing()

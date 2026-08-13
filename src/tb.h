@@ -55,6 +55,17 @@ typedef struct tb_clock {
 
 extern const tb_clock tb_clock_real;
 
+/* ---- JS 引擎 seam(M2a) ---- */
+struct tb_js_engine {
+  void *(*open)(const struct tb_js_engine *self, struct tb_browser *host);   /* 修正①:传 host 而非 cfg,支持 __tb_load_sync nested pump */
+  int   (*load_document)(const struct tb_js_engine *self, void *h, const char *body, size_t len);
+  int   (*render)(const struct tb_js_engine *self, void *h, const char *url, int status, struct tb_view *out);  /* 修正②:带 url/status,与 M1 tb_render 对齐 */
+  int   (*eval)(const struct tb_js_engine *self, void *h, const char *code, char **out);  /* *out = malloc,调用方 free */
+  void  (*poll_timers)(const struct tb_js_engine *self, void *h);
+  void  (*close)(const struct tb_js_engine *self, void *h);
+};
+const struct tb_js_engine *tb_default_js_engine(void);
+
 /* ---- 公共 API ---- */
 
 typedef void (*tb_on_idle)(tb_browser *, void *ud);
@@ -74,6 +85,10 @@ typedef struct tb_config {
   const tb_transport *transport; /* NULL → 真实 curl 传输 */
   const tb_clock *clock;         /* NULL → tb_clock_real */
   void *ud;
+  int64_t js_memory_limit;              /* QuickJS 内存上限字节;0=默认 */
+  uint32_t js_exec_ms_limit;            /* 单脚本执行毫秒上限;0=不限制 */
+  void (*on_console)(tb_browser *, const char *level, const char *msg, void *ud);
+  const struct tb_js_engine *js_engine; /* NULL → 默认 quickjs engine */
 } tb_config;
 
 /* 视图(不透明;访问器见下) */
@@ -98,6 +113,8 @@ tb_err tb_submit(tb_browser *b, int form_id);
 int tb_wait_idle(tb_browser *b, uint32_t timeout_ms);  /* 0=空闲,1=超时未空闲 */
 int tb_pump(tb_browser *b, uint32_t timeout_ms);       /* 0=空闲,1=仍忙 */
 void tb_free(void *p);
+
+tb_err tb_eval_js(tb_browser *b, const char *code, char **out); /* *out = malloc,调用方 free */
 
 struct tb_elem {
   int id;

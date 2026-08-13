@@ -13,6 +13,7 @@ copies are checked directly into git (no system packages, no submodule fetch).
 | lexbor     | v2.4.0   | codeload: lexbor/lexbor@refs/tags/v2.4.0        |
 | termbox2   | v2.5.0   | codeload: termbox/termbox2@refs/tags/v2.5.0     |
 | libcurl    | curl-8_11_0 | codeload: curl/curl@refs/tags/curl-8_11_0   |
+| quickjs-ng | v0.16.1    | codeload: quickjs-ng/quickjs@refs/tags/v0.16.1 |
 
 mbedTLS is the **only** TLS backend. No OpenSSL anywhere in the build
 (`CMAKE_USE_OPENSSL=OFF`, `CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE`).

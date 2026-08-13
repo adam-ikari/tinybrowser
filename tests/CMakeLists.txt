@@ -93,3 +93,9 @@ add_executable(test_hint unit/test_hint.cc)
 target_include_directories(test_hint PRIVATE ${TB_TEST_INCS})
 target_link_libraries(test_hint PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_hint)
+
+# quickjs-ng 嵌入 smoke:验证 vendored engine 可链接、可求值、内存上限生效。
+add_executable(test_qjs_embed unit/test_qjs_embed.cc)
+target_include_directories(test_qjs_embed PRIVATE ${TB_TEST_INCS} ${CMAKE_CURRENT_SOURCE_DIR}/../deps/quickjs-ng)
+target_link_libraries(test_qjs_embed PRIVATE tinybrowser qjs gtest_main)
+gtest_discover_tests(test_qjs_embed)

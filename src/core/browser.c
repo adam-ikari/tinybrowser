@@ -1,4 +1,5 @@
 #include "tb.h"
+#include "browser_internal.h"
 #include "content.h"
 #include "curl_transport.h"
 #include "dom.h"
@@ -11,19 +12,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { int id; char *value; } fv_t;
+/* Task 1 临时 stub:js_engine.c 真实实现前返回 NULL(Task 5 替换)。
+   tb_create 里 b->engine = cfg.js_engine ? cfg.js_engine : tb_default_js_engine(); */
+const struct tb_js_engine *tb_default_js_engine(void) { return NULL; }
 
-struct tb_browser {
-  tb_config cfg;
-  tb_session session;
-  tb_dom *dom;
-  tb_view *view;
-  const tb_transport *transport;
-  fv_t fv[64];          /* 表单值(由 tb_fill/tb_select 写入),M1 固定槽 */
-  int nfv;
-  uv_loop_t loop;
-  int loop_init;        /* 1 = 默认 curl transport + 自有 uv loop */
-};
+/* Task 1 临时实现:engine 未接或 js_doc 未建时返回 TB_ERR_NO_VIEW(Task 5 换真实现)。 */
+tb_err tb_eval_js(tb_browser *b, const char *code, char **out) {
+  if (!b || !b->engine || !b->js_doc) { tb_err e = { TB_ERR_NO_VIEW, "no js view" }; return e; }
+  (void)code; (void)out;
+  tb_err e = { TB_ERR_ARG, "not implemented" };
+  return e;
+}
 
 /* ---- 导航上下文:把传输回调桥接到浏览器状态 ---- */
 typedef struct {
@@ -363,6 +362,7 @@ tb_browser *tb_create(const tb_config *cfg) {
     }
   }
   b->transport = b->cfg.transport;
+  b->engine = b->cfg.js_engine ? b->cfg.js_engine : tb_default_js_engine();
   tb_session_init(&b->session, b->cfg.clock, b->cfg.idle_grace_ms);
   return b;
 }
@@ -374,6 +374,7 @@ void tb_destroy(tb_browser *b) {
   tb_dom_free(b->dom);
   tb_view_free(b->view);
   for (int i = 0; i < b->nfv; i++) free(b->fv[i].value);
+  free(b->cookie_jar);
   free(b);
 }
 
