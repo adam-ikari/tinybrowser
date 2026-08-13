@@ -4,3 +4,4 @@
 globalThis.load = std.loadScript;
 load("./src/js/parser.js");
 load("./src/js/dom.js");
+load("./src/js/render.js");
