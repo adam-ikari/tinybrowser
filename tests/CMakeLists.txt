@@ -108,5 +108,9 @@ add_custom_target(tb_js_runner ALL DEPENDS qjs_exe)
 add_test(NAME js_parser
   COMMAND $<TARGET_FILE:qjs_exe> --std -I ${CMAKE_CURRENT_SOURCE_DIR}/js/lib/bootstrap.js
           ${CMAKE_CURRENT_SOURCE_DIR}/js/parser.test.js)
+add_test(NAME js_dom
+  COMMAND $<TARGET_FILE:qjs_exe> --std -I ${CMAKE_CURRENT_SOURCE_DIR}/js/lib/bootstrap.js
+          ${CMAKE_CURRENT_SOURCE_DIR}/js/dom.test.js)
 # bootstrap/testlib 用相对路径 load,须以仓库根为工作目录
 set_tests_properties(js_parser PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_tests_properties(js_dom PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

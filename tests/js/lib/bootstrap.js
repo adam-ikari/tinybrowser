@@ -3,3 +3,4 @@
 // 通过 `qjs --std -I tests/js/lib/bootstrap.js tests/js/xxx.test.js` 使用。
 globalThis.load = std.loadScript;
 load("./src/js/parser.js");
+load("./src/js/dom.js");
