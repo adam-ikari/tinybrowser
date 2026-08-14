@@ -8,8 +8,16 @@ var _tb_block = { p:1, div:1, h1:1, h2:1, h3:1, h4:1, h5:1, h6:1, li:1, ul:1, ol
   br:1, hr:1, blockquote:1, pre:1, form:1, select:1, fieldset:1 };
 var _tb_skip = { script:1, style:1, noscript:1, head:1 };
 
+// 视图 id(计数器) → 节点 映射。render 输出 M1 式 id——只给记录的
+// link/form/input/button/select 按 walk 序从 1 连续编号(镜像 dom.c tb_dom_id),
+// 而非 parser 的 n.id(所有元素都编号)。此映射供 _tb_elem_info/_tb_form_info
+// 把视图 id 解析回节点(方案A:golden 逐字节不变 + 交互 id 与 M1 一致)。
+var __tb_view_nodes = {};
+
 function tb_render_js(doc, url, status) {
   var c = { text: "", title: "", elems: [], url: url || "", status: status };
+  var nextId = 0;                // M1 tb_dom_id 计数器:仅记录的元素递增
+  __tb_view_nodes = {};          // 每渲染一张视图重建映射
   var at_line_start = true;      // render.c ctx.at_line_start:行首空白不追加
 
   // push:逐字镜像 render.c:15-33。不折叠连续换行;\r 走 else 分支原样追加。
@@ -35,8 +43,9 @@ function tb_render_js(doc, url, status) {
   function newline() { push("\n"); }
 
   // add_elem:镜像 render.c:63-85。href/name/value 全部从 attrs 同名取。
+  // id 用计数器而非 n.id:与 M1 tb_dom_id 一致(记录序从 1 连续),golden 逐字节不变。
   function addElem(type, n) {
-    var e = { id: n.id, type: type, text: "", href: n.attrs.href || "",
+    var e = { id: ++nextId, type: type, text: "", href: n.attrs.href || "",
               name: n.attrs.name || "", value: n.attrs.value || "",
               options: [], off: c.text.length };
     if (type === "select" || type === "form") {
@@ -52,6 +61,7 @@ function tb_render_js(doc, url, status) {
       e.text = out.trim();
     }
     c.elems.push(e);
+    __tb_view_nodes[String(e.id)] = n;   // 视图 id → 节点(交互查询用)
   }
   function isBlock(tag) { return _tb_block[tag] ? true : false; }
 

@@ -142,9 +142,14 @@ var document = {
   set cookie(v) { if (typeof __tb_cookie_set === "function") __tb_cookie_set(String(v)); }
 };
 
-// 交互辅助(供 C 侧 engine->eval):返回 JSON 字符串
+// 交互辅助(供 C 侧 engine->eval):返回 JSON 字符串。
+// id 是 render.js 输出的视图 id(计数器,方案A)。优先经 __tb_view_nodes 映射回节点;
+// 未渲染过的文档(无映射)退回 getElementById 按 parser/attrs id 查。
 function _tb_elem_info(id) {
-  var n = document.getElementById(String(id));
+  var n = null;
+  if (typeof __tb_view_nodes === "object" && __tb_view_nodes[String(id)])
+    n = __tb_view_nodes[String(id)];
+  if (!n) n = document.getElementById(String(id));
   if (!n || n.type !== "element") return JSON.stringify({ tag: "" });
   var o = { tag: n.tag };
   if (n.tag === "a") o.href = n.attrs.href || "";
@@ -160,8 +165,14 @@ function _tb_elem_info(id) {
   return JSON.stringify(o);
 }
 function _tb_form_of(node) {
-  // 迭代向上找 form 祖先
+  // 迭代向上找 form 祖先;返回其视图 id(render 计数器,与 _tb_elem_info 的 id 同域)。
   var p = node.parent;
-  while (p) { if (p.type === "element" && p.tag === "form") return p.id; p = p.parent; }
+  while (p) {
+    if (p.type === "element" && p.tag === "form") {
+      for (var k in __tb_view_nodes) if (__tb_view_nodes[k] === p) return Number(k);
+      return p.id;   // 兜底:未渲染过的文档退回 parser id
+    }
+    p = p.parent;
+  }
   return 0;
 }

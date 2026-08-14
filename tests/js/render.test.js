@@ -92,4 +92,38 @@ t("option text not in body", function () {
   eq(r.text, "");
 });
 
+t("elems id consecutive from 1 over recorded only (M1 counter parity)", function () {
+  var r = R("<p>skip</p><a href='/a'>A</a><br><button>Go</button><input name='q'>");
+  // 非记录元素(p/br/文本)不占号;link=1, button=2, input=3 —— 与 M1 tb_dom_id 一致
+  eq(r.elems.length, 3);
+  eq(r.elems[0].id, 1);
+  eq(r.elems[0].type, "link");
+  eq(r.elems[1].id, 2);
+  eq(r.elems[1].type, "button");
+  eq(r.elems[2].id, 3);
+  eq(r.elems[2].type, "input");
+});
+
+t("view id resolves to node via mapping (_tb_elem_info)", function () {
+  var r = R("<a href='/x'>l</a><input name='q'><button>Go</button>");
+  var a = JSON.parse(_tb_elem_info(r.elems[0].id));
+  eq(a.tag, "a");
+  eq(a.href, "/x");
+  var inp = JSON.parse(_tb_elem_info(r.elems[1].id));
+  eq(inp.tag, "input");
+  eq(inp.type, "text");
+  var btn = JSON.parse(_tb_elem_info(r.elems[2].id));
+  eq(btn.tag, "button");
+});
+
+t("button form resolves to form's view id", function () {
+  var r = R("<form action='/s'><input name='q'><button>Go</button></form>");
+  // 记录序:form=1, input=2, button=3;_tb_form_of 应返回 form 的视图 id=1
+  eq(r.elems[0].type, "form");
+  eq(r.elems[0].id, 1);
+  var btn = JSON.parse(_tb_elem_info(r.elems[2].id));
+  eq(btn.tag, "button");
+  eq(btn.form, 1);
+});
+
 done();
