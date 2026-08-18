@@ -56,6 +56,7 @@ typedef struct tb_clock {
 extern const tb_clock tb_clock_real;
 
 /* ---- JS 引擎 seam(M2a) ---- */
+struct tb_view;   /* 前置声明:render 成员的类型须与 view.h 的 struct tb_view 一致 */
 struct tb_js_engine {
   void *(*open)(const struct tb_js_engine *self, struct tb_browser *host);   /* 修正①:传 host 而非 cfg,支持 __tb_load_sync nested pump */
   int   (*load_document)(const struct tb_js_engine *self, void *h, const char *body, size_t len);

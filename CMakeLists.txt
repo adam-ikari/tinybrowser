@@ -85,6 +85,7 @@ add_library(tinybrowser STATIC
   src/core/hint.c
   src/core/session.c
   src/core/curl_transport.c
+  src/core/js_engine.c
 )
 target_include_directories(tinybrowser PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -93,6 +94,8 @@ target_include_directories(tinybrowser PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/deps/mbedtls/include
   # 用自己的 libcurl 头(与 libcurl.a 同源,避免误用系统 OpenSSL 版头)。
   ${CMAKE_CURRENT_SOURCE_DIR}/deps/libcurl/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/deps/quickjs-ng
+  ${CMAKE_CURRENT_BINARY_DIR}/src/core   # js_builtins.inc
 )
 # mbedTLS provides three static libs: mbedtls / mbedx509 / mbedcrypto.
 # Use target names exposed by deps/mbedtls (canonical mbedtls 3.x names).

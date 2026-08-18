@@ -12,16 +12,91 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Task 1 临时 stub:js_engine.c 真实实现前返回 NULL(Task 5 替换)。
-   tb_create 里 b->engine = cfg.js_engine ? cfg.js_engine : tb_default_js_engine(); */
-const struct tb_js_engine *tb_default_js_engine(void) { return NULL; }
+#include "js_engine.h"
 
-/* Task 1 临时实现:engine 未接或 js_doc 未建时返回 TB_ERR_NO_VIEW(Task 5 换真实现)。 */
+/* Task 5: tb_default_js_engine 现在由 js_engine.c 提供真实实现，
+   这里不再需要 stub。但 tb.h 声明在 js_engine.h 中，
+   browser.c 通过 js_engine.h 拿到它。 */
+
+/* Task 5: tb_eval_js 真实现 */
 tb_err tb_eval_js(tb_browser *b, const char *code, char **out) {
-  if (!b || !b->engine || !b->js_doc) { tb_err e = { TB_ERR_NO_VIEW, "no js view" }; return e; }
-  (void)code; (void)out;
-  tb_err e = { TB_ERR_ARG, "not implemented" };
-  return e;
+  if (!b || !b->engine || !b->js_doc) {
+    tb_err e = { TB_ERR_NO_VIEW, "no document" };
+    return e;
+  }
+  int rc = b->engine->eval(b->engine, b->js_doc, code, out);
+  if (rc != 0) {
+    tb_err e = { TB_ERR_PARSE, "eval failed" };
+    return e;
+  }
+  tb_err ok = { 0, "" };
+  return ok;
+}
+
+/* ---- 子资源同步获取:nested pump (Task 5) ---- */
+
+/* transport 回调上下文 (tb_load_sync 内部用) */
+typedef struct {
+  int done;
+  int failed;
+  char *body;
+  size_t blen, bcap;
+} sync_ctx;
+
+static void sync_on_headers(void *ud, int status, const char *ct,
+                            int attachment, const char *final_url) {
+  (void)ud; (void)status; (void)ct; (void)attachment; (void)final_url;
+}
+
+static void sync_on_body(void *ud, const char *data, size_t len) {
+  sync_ctx *c = (sync_ctx *)ud;
+  if (c->bcap < c->blen + len + 1) {
+    c->bcap = (c->blen + len + 1) * 2;
+    c->body = realloc(c->body, c->bcap);
+  }
+  memcpy(c->body + c->blen, data, len);
+  c->blen += len;
+  c->body[c->blen] = '\0';
+}
+
+static void sync_on_done(void *ud, tb_err err) {
+  sync_ctx *c = (sync_ctx *)ud;
+  c->done = 1;
+  if (err.code != 0) { c->failed = 1; }
+}
+
+tb_err tb_load_sync(tb_browser *b, const char *url, char **out) {
+  if (!b || !url || !out) {
+    if (out) *out = strdup("");
+    tb_err e = { TB_ERR_ARG, "bad args" };
+    return e;
+  }
+  sync_ctx ctx; memset(&ctx, 0, sizeof ctx);
+
+  tb_transport_req req; memset(&req, 0, sizeof req);
+  req.method = "GET";
+  req.url = url;
+  req.on_headers = sync_on_headers;
+  req.on_body    = sync_on_body;
+  req.on_done    = sync_on_done;
+  req.ud         = &ctx;
+
+  void *op = b->transport->open(b->transport, &req);
+  if (!op) { *out = strdup(""); tb_err e = { TB_ERR_NET, "open failed" }; return e; }
+
+  const tb_clock *clk = b->cfg.clock;
+  uint64_t t0 = clk->now_ms(clk);
+  uint32_t timeout = b->cfg.nav_timeout_ms ? b->cfg.nav_timeout_ms : 30000;
+
+  while (!ctx.done && !ctx.failed) {
+    if (b->loop_init) uv_run(&b->loop, UV_RUN_NOWAIT);
+    b->transport->poll(b->transport);
+    if (clk->now_ms(clk) - t0 > timeout) break;
+  }
+  b->transport->cancel(b->transport, op);
+
+  *out = ctx.body ? ctx.body : strdup("");
+  return (ctx.done && !ctx.failed) ? (tb_err){0, ""} : (tb_err){TB_ERR_TIMEOUT, "timeout"};
 }
 
 /* ---- 导航上下文:把传输回调桥接到浏览器状态 ---- */

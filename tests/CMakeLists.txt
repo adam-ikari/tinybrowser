@@ -78,7 +78,7 @@ gtest_discover_tests(test_tls)
 
 add_executable(golden_runner goldens/golden_runner.cc)
 target_include_directories(golden_runner PRIVATE ${TB_TEST_INCS})
-target_link_libraries(golden_runner PRIVATE tinybrowser)
+target_link_libraries(golden_runner PRIVATE tinybrowser qjs gtest_main)
 add_test(NAME golden COMMAND golden_runner ${CMAKE_SOURCE_DIR}/)
 
 add_executable(test_render_coord unit/test_render_coord.cc)
@@ -99,6 +99,11 @@ add_executable(test_qjs_embed unit/test_qjs_embed.cc)
 target_include_directories(test_qjs_embed PRIVATE ${TB_TEST_INCS} ${CMAKE_CURRENT_SOURCE_DIR}/../deps/quickjs-ng)
 target_link_libraries(test_qjs_embed PRIVATE tinybrowser qjs gtest_main)
 gtest_discover_tests(test_qjs_embed)
+# js_engine.c seam 实现单元测试(Task 5)
+add_executable(test_js_engine unit/test_js_engine.cc harness/fakes.c)
+target_include_directories(test_js_engine PRIVATE ${TB_TEST_INCS} ${CMAKE_CURRENT_SOURCE_DIR}/../deps/quickjs-ng)
+target_link_libraries(test_js_engine PRIVATE tinybrowser qjs gtest_main)
+gtest_discover_tests(test_js_engine)
 
 # 纯 JS 单测:parser.js tokenizer。qjs 二进制 OUTPUT_NAME=qjs,目标名 qjs_exe。
 # quickjs-ng 移除全局 load(移入 std.loadScript,需 --std),
