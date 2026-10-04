@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [js, qzjs, quickjs, engine, submodule]
 created: "2026-10-04T14:05:26"
-updated: "2026-10-04T15:40:50"
+updated: "2026-10-04T16:25:45"
 ---
 
 <!-- compiled_truth -->
@@ -136,4 +136,10 @@ updated: "2026-10-04T15:40:50"
   kind: decision
   summary: "迁移完成:控制面 eval 桥已落地,附踩坑与构建要点"
   source: "实现 + 74 测试全绿 + 全新 build 目录验证"
+  affects: [qzjs-engine-swap]
+
+- time: 2026-10-04T16:25:45
+  kind: reversal
+  summary: "修正上一条结论:「minimal 之后单独打开 QZ_WITH_TLS 即可」是错的 —— 那只改了 cache,已生成的构建规则不回溯,实际编出 QZ_WITH_TLS=0(假开关,HTTPS 整段被 #if 掉)。正确做法:预置 QZ_PROFILE_LAST 跳过 profile-switch,且所有 QZ_WITH_* 必须在 add_subdirectory 之前落 cache"
+  source: "开启 TLS 时实测 flags.make 发现"
   affects: [qzjs-engine-swap]

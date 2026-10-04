@@ -25,16 +25,28 @@ set(QZ_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(QZ_BUILD_CLI      OFF CACHE BOOL "" FORCE)
 set(QZ_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(QZ_BUILD_DEBUGGER OFF CACHE BOOL "" FORCE)
-# QZ_PROFILE=minimal 是关掉 WebAssembly 引擎(wamr/wasm3)的档位。
-# 必须走 profile,不能靠外层 `set(QZ_WITH_WAMR OFF CACHE ... FORCE)`:
-# qzjs 的 profile-switch 块(deps/qzjs/CMakeLists.txt:169)在 add_subdirectory
-# 期间会用 FORCE 把整组 QZ_WITH_* 重写一遍,外层 set 无论放前还是普通变量都被盖掉。
+# QZ_PROFILE=minimal 是关掉 WebAssembly 引擎(wamr/wasm3)的档位。浏览器不跑 wasm,
+# 且本仓库不初始化 wamr/wasm3 子模块(见 deps/VERSIONS.md)。
 set(QZ_PROFILE "minimal" CACHE STRING "" FORCE)
-add_subdirectory(deps/qzjs)
+# ⚠️ 关键:把 QZ_PROFILE_LAST 预置成与 QZ_PROFILE 相同,qzjs 的 profile-switch 块
+# (deps/qzjs/CMakeLists.txt:169 `if(NOT QZ_PROFILE_LAST STREQUAL _qz_profile)`)
+# 就不会执行 —— 它会用 FORCE 把整组 QZ_WITH_* 重写一遍(standard/empty 分支里
+# QZ_WITH_WAMR 和 QZ_WITH_TLS 都被强制成 ON),把我们的设定全部盖掉。
+set(QZ_PROFILE_LAST "minimal" CACHE STRING "" FORCE)
 
-# minimal 顺带把 TLS 也关了(它假定不需要 https)。我们要 https —— 浏览器没有
-# TLS 就只能看明文页。qzjs 的 profile-switch 已经跑完,这里再打开就不会被回写。
-set(QZ_WITH_TLS ON CACHE BOOL "" FORCE)
+# 下面的 QZ_WITH_* 必须全部在 add_subdirectory **之前**落进 cache。
+# qzjs 是在 add_subdirectory 期间读取这些值来决定:链不链 mbedTLS、编不编
+# QZ_WITH_TLS 宏(uv_io.c / tcp_io.c 的 HTTPS 分支全靠它)。之后再改 cache 不会
+# 回溯已生成的构建规则 —— 曾经因此出现「cache 显示 ON、flags.make 里却是
+# QZ_WITH_TLS=0」的假开关:HTTPS 代码整段被 #if 掉,且 libqzjs 没链 mbedTLS。
+set(QZ_WITH_TLS        ON  CACHE BOOL "" FORCE)  # 浏览器必须能开 https 页面
+set(QZ_WITH_CRYPTO_EXT ON  CACHE BOOL "" FORCE)  # TLS 依赖 crypto(TLS 会强制它,显式写清)
+set(QZ_WITH_COMPRESS   ON  CACHE BOOL "" FORCE)
+set(QZ_WITH_TEXTCODEC  ON  CACHE BOOL "" FORCE)
+set(QZ_WITH_WAMR       OFF CACHE BOOL "" FORCE)  # 不跑 wasm,且未初始化该子模块
+set(QZ_WITH_WASM3      OFF CACHE BOOL "" FORCE)
+
+add_subdirectory(deps/qzjs)
 
 # lexbor: HTML/CSS/HTML parser
 set(LEXBOR_BUILD_TESTS OFF CACHE BOOL "" FORCE)

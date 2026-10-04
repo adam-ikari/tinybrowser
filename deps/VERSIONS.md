@@ -56,6 +56,31 @@ The toolchain check runs at **configure** time, so re-running CMake after
 `npm ci` is required; otherwise the build fails with an actionable message about
 the missing polyfill toolchain.
 
+### TLS
+
+`QZ_WITH_TLS=ON`, so qzjs links mbedTLS and compiles its HTTPS branches.
+`QZ_PROFILE=minimal` would otherwise disable TLS (it assumes no https needed);
+we re-enable it explicitly.
+
+⚠️ **All `QZ_WITH_*` values must be written to the CMake cache *before*
+`add_subdirectory(deps/qzjs)`.** qzjs reads them *during* that call to decide
+whether to link mbedTLS and whether to define `QZ_WITH_TLS` (which gates the
+HTTPS code in `uv_io.c` / `tcp_io.c`). Changing the cache afterwards does not
+retroactively change already-generated build rules. Setting it after produced a
+silent no-op switch: `CMakeCache.txt` said `QZ_WITH_TLS:BOOL=ON` while
+`flags.make` compiled `QZ_WITH_TLS=0` — the entire HTTPS path compiled out and
+`libqzjs` never linked mbedTLS. **Verify with
+`grep QZ_WITH_TLS build/deps/qzjs/CMakeFiles/qzjs.dir/flags.make`, not the
+cache.**
+
+`QZ_PROFILE_LAST` is pre-seeded to match `QZ_PROFILE` so qzjs's profile-switch
+block (`deps/qzjs/CMakeLists.txt:169`) is skipped; otherwise it `FORCE`-rewrites
+the whole `QZ_WITH_*` group and undoes our settings.
+
+Note: our test suite does not exercise HTTPS — every test uses a fake transport
+or plain local http, so a broken TLS build still passes all 74 tests. Check the
+compiled flag, not the tests.
+
 mbedTLS is the **only** TLS backend. No OpenSSL anywhere in the build
 (`CMAKE_USE_OPENSSL=OFF`, `CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=TRUE`).
 
