@@ -195,3 +195,20 @@ TEST(QzjsEmbed, StrictModeDeniesFs) {
   EXPECT_EQ(*r, "true");
   qz_destroy(rt);
 }
+
+/* TLS 必须真的编进库。qzjs 在 configure 期读 QZ_WITH_TLS 决定链不链 mbedTLS,
+ * 而我们此前是在 add_subdirectory 之后才改 cache —— 已生成的构建规则不回溯,
+ * 产出过「cache 显示 ON、实际 QZ_WITH_TLS=0」的假开关。CMake 层已有说明,
+ * 这里从运行期再钉一道:编译期宏必须为 1,否则 https 分支整段被 #if 掉。
+ *
+ * 注意本测试**不联网**:真实 https fetch 曾因 uv_io 的握手完成路径缺陷而
+ * 失败(见下),那是网络依赖,不适合放进单元测试。这里只验「TLS 被编进去了」。 */
+TEST(QzjsEmbed, TlsIsCompiledIn) {
+#ifndef QZ_WITH_TLS
+  FAIL() << "QZ_WITH_TLS undefined — TLS support not compiled in";
+#endif
+  EXPECT_EQ(QZ_WITH_TLS, 1)
+      << "QZ_WITH_TLS=0: HTTPS paths are #if'd out. Check that every "
+         "QZ_WITH_* is written to the CMake cache BEFORE "
+         "add_subdirectory(deps/qzjs) — see deps/VERSIONS.md.";
+}
