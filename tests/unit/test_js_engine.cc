@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 #include <string.h>
 #include <stdlib.h>
+#include <thread>
+#include <chrono>
 
 /* ---- seam basics: open / eval / close ---- */
 
@@ -66,8 +68,13 @@ TEST(JsEngine, ConsoleBridgeWithoutHost) {
   eng->close(eng, h);
 }
 
+/* console 桥:旧实现是宿主 C 函数 __tb_console 直调 cfg.on_console。
+ * 现在 qzjs 从不回调宿主,console 输出走 postMessage 进邮箱,由宿主在控制面
+ * 往返途中(或 poll_timers)派发。所以 console.warn 之后紧接着的 eval 就应该
+ * 已经把消息带回来了 —— 不需要额外 pump。 */
 TEST(JsEngine, ConsoleBridgeWithHost) {
   g_console_calls = 0;
+  g_console_msg[0] = '\0';
   fake_clock fc; fake_clock_init(&fc);
   fake_transport ft; fake_transport_init(&ft, &fc);
   tb_config cfg; memset(&cfg, 0, sizeof cfg);
@@ -82,10 +89,37 @@ TEST(JsEngine, ConsoleBridgeWithHost) {
   void *h = eng->open(eng, b);
   ASSERT_NE(h, nullptr);
   char *out = nullptr;
-  eng->eval(eng, h, "__tb_console('warn', 'test msg')", &out);
+  eng->eval(eng, h, "console.warn('test msg')", &out);
   free(out);
   EXPECT_EQ(g_console_calls, 1);
   EXPECT_STREQ(g_console_msg, "test msg");
+  eng->close(eng, h);
+  tb_destroy(b);
+}
+
+/* console 消息若先于回执到达邮箱,派发顺序不能把 correl 对错帧:
+ * 一次 eval 里先 console 再返回值,两条都得正确归位。 */
+TEST(JsEngine, ConsoleMessageDoesNotCorruptReceipt) {
+  g_console_calls = 0;
+  g_console_msg[0] = '\0';
+  fake_clock fc; fake_clock_init(&fc);
+  fake_transport ft; fake_transport_init(&ft, &fc);
+  tb_config cfg; memset(&cfg, 0, sizeof cfg);
+  cfg.user_agent = "t";
+  cfg.clock = &fc.base;
+  cfg.transport = &ft.base;
+  cfg.on_console = test_on_console;
+  tb_browser *b = tb_create(&cfg);
+  ASSERT_NE(b, nullptr);
+  const struct tb_js_engine *eng = b->engine;
+  void *h = eng->open(eng, b);
+  ASSERT_NE(h, nullptr);
+  char *out = nullptr;
+  ASSERT_EQ(eng->eval(eng, h, "console.log('a'); 'the-result'", &out), 0);
+  EXPECT_STREQ(out, "the-result");   /* 回执没被 console 帧串味 */
+  EXPECT_EQ(g_console_calls, 1);
+  EXPECT_STREQ(g_console_msg, "a");
+  free(out);
   eng->close(eng, h);
   tb_destroy(b);
 }
@@ -159,31 +193,68 @@ TEST(JsEngine, ScriptErrorIsolated) {
   eng->close(eng, h);
 }
 
-/* ---- timer set/cancel (host=NULL path, no-op) ---- */
+/* ---- timers ----
+ * 旧实现里 setTimeout 是宿主 C 桥(__tb_timer_set),宿主自己跑链表。
+ * 现在定时器归 qzjs polyfill(它有自有 event loop),qzjs 又从不回调宿主,
+ * 所以宿主侧不再有 timer 链表——这里验的是 polyfill 的定时器确实可用,
+ * 且没有 host 时引擎照样能开、能注册、能取消。 */
 
-TEST(JsEngine, TimerNoOpWithoutHost) {
+TEST(JsEngine, SetTimeoutIsProvidedByPolyfill) {
   const struct tb_js_engine *eng = tb_default_js_engine();
   void *h = eng->open(eng, NULL);
+  ASSERT_NE(h, nullptr);
   char *out = nullptr;
-  eng->eval(eng, h, "var tid = __tb_timer_set(100, function(){}); tid", &out);
-  /* should return 0 (no-op) */
-  EXPECT_STREQ(out, "0");
+  /* 注册 + 取消,确认句柄可用且不抛 */
+  ASSERT_EQ(eng->eval(eng, h,
+      "var tid = setTimeout(function(){}, 100000);"
+      "clearTimeout(tid);"
+      "typeof tid", &out), 0);
+  EXPECT_STREQ(out, "number");
   free(out);
   eng->poll_timers(eng, h);
   eng->close(eng, h);
 }
 
-/* ---- memory limit ---- */
-
-TEST(JsEngine, MemoryLimitTriggersOOM) {
+/* 定时器回调跑在 qzjs 自有线程上,轮询几次后应已执行。 */
+TEST(JsEngine, TimerCallbackFires) {
   const struct tb_js_engine *eng = tb_default_js_engine();
-  /* open with a restrictive memory limit */
+  void *h = eng->open(eng, NULL);
+  ASSERT_NE(h, nullptr);
+  char *out = nullptr;
+  ASSERT_EQ(eng->eval(eng, h,
+      "globalThis.__fired = false;"
+      "setTimeout(function(){ __fired = true; }, 1);"
+      "typeof __fired", &out), 0);
+  free(out);
+
+  for (int i = 0; i < 200; i++) {
+    eng->poll_timers(eng, h);
+    out = nullptr;
+    if (eng->eval(eng, h, "String(__fired)", &out) == 0 && out &&
+        strcmp(out, "true") == 0) {
+      free(out);
+      eng->close(eng, h);
+      SUCCEED();
+      return;
+    }
+    free(out);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  eng->close(eng, h);
+  FAIL() << "timer callback did not fire within 1s";
+}
+
+/* ---- OOM ----
+ * qzjs 不暴露 JS_SetMemoryLimit(无内存上限旋钮),所以这里不再是「配置限额触发
+ * OOM」,而是「引擎自身在堆耗尽时抛 JS 异常,并如实以 eval 失败回传」。 */
+
+TEST(JsEngine, OutOfMemorySurfacesAsError) {
+  const struct tb_js_engine *eng = tb_default_js_engine();
   fake_clock fc; fake_clock_init(&fc);
   fake_transport ft; fake_transport_init(&ft, &fc);
   tb_config cfg; memset(&cfg, 0, sizeof cfg);
   cfg.clock = &fc.base;
   cfg.transport = &ft.base;
-  cfg.js_memory_limit = 64 * 1024;
   tb_browser *b = tb_create(&cfg);
   void *h = eng->open(eng, b);
   ASSERT_NE(h, nullptr);

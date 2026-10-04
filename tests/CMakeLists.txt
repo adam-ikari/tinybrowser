@@ -71,7 +71,8 @@ gtest_discover_tests(test_network)
 # 不显式列出 mbedtls:tinybrowser 已 PUBLIC 链接(顺序 curl→mbedtls,静态库单向解析),
 # 显式列出会让 mbedtls 提前到 libcurl 前面导致未定义符号。
 add_executable(test_tls unit/test_tls.cc harness/tls_server.cc)
-target_include_directories(test_tls PRIVATE ${TB_TEST_INCS} ${CMAKE_CURRENT_SOURCE_DIR}/../deps/mbedtls/include)
+# mbedTLS 头随 qzjs 子模块进来(qzjs 自己 add_subdirectory 这份)。
+target_include_directories(test_tls PRIVATE ${TB_TEST_INCS} ${CMAKE_CURRENT_SOURCE_DIR}/../deps/qzjs/deps/mbedtls/include)
 target_compile_definitions(test_tls PRIVATE TB_TEST_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/")
 target_link_libraries(test_tls PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_tls)
@@ -94,15 +95,16 @@ target_include_directories(test_hint PRIVATE ${TB_TEST_INCS})
 target_link_libraries(test_hint PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_hint)
 
-# quickjs-ng 嵌入 smoke:验证 vendored engine 可链接、可求值、内存上限生效。
-add_executable(test_qjs_embed unit/test_qjs_embed.cc)
-target_include_directories(test_qjs_embed PRIVATE ${TB_TEST_INCS} ${CMAKE_CURRENT_SOURCE_DIR}/../deps/quickjs-ng)
-target_link_libraries(test_qjs_embed PRIVATE tinybrowser qjs gtest_main)
-gtest_discover_tests(test_qjs_embed)
+# qzjs 接入 smoke:验证引擎底座可创建、控制面 eval/inspect 往返可用。
+add_executable(test_qzjs_embed unit/test_qzjs_embed.cc)
+target_include_directories(test_qzjs_embed PRIVATE ${TB_TEST_INCS})
+target_link_libraries(test_qzjs_embed PRIVATE tinybrowser qzjs gtest_main)
+gtest_discover_tests(test_qzjs_embed)
+
 # js_engine.c seam 实现单元测试(Task 5)
 add_executable(test_js_engine unit/test_js_engine.cc harness/fakes.c)
-target_include_directories(test_js_engine PRIVATE ${TB_TEST_INCS} ${CMAKE_CURRENT_SOURCE_DIR}/../deps/quickjs-ng)
-target_link_libraries(test_js_engine PRIVATE tinybrowser qjs gtest_main)
+target_include_directories(test_js_engine PRIVATE ${TB_TEST_INCS})
+target_link_libraries(test_js_engine PRIVATE tinybrowser qzjs gtest_main)
 gtest_discover_tests(test_js_engine)
 
 # 纯 JS 单测:parser.js tokenizer。qjs 二进制 OUTPUT_NAME=qjs,目标名 qjs_exe。

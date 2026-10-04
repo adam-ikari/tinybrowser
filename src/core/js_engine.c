@@ -1,551 +1,565 @@
+/* JS 引擎 = qzjs(嵌入式 QuickJS-ng 运行时)。
+ *
+ * 与旧实现的关键差别:宿主**不再**直接持有 JSContext/JSValue。qzjs 的主权原则
+ * (include/qzjs/qzjs.h:130)规定库从不执行宿主代码,JS 跑在库自有线程 + 自有 uv
+ * loop 上。宿主与 JS 的唯一通道是:
+ *   入站 qz_control(rt, cmd)   —— 命令排队,qzjs 线程在事件循环安全点执行
+ *   出站 qz_recv_message(...)  —— per-rt FIFO 邮箱,取回执(JSON)
+ *
+ * 同步语义由「发命令 + 阻塞收回执」拼出来,不需要宿主回调:
+ *   {"op":"eval","correl":"N","script":"..."}   → JS_Eval,回执带 result/error
+ *   {"op":"inspect","correl":"N","expr":"..."}   → 求值 + JSON.stringify,回执带 json
+ * 两者都由 qzjs 在**它自己的线程上**执行(control.c:998 qz_control_dispatch),
+ * 所以 JSContext 的访问是合法的。回执经 JS_JSONStringify(control.c:120),即回执
+ * 本身是一段 JSON 文本。
+ */
 #include "js_engine.h"
 #include "tb.h"
 #include "view.h"
 #include "browser_internal.h"
-#include <quickjs.h>
+#include <qzjs/qzjs.h>
+#include <cJSON.h>
 #include <string.h>
 #include <stdlib.h>
 
 /* 内置 JS: dom.js + parser.js + render.js (由 cmake 生成) */
 #include "js_builtins.inc"
 
-/* 引擎实例:内部封装 QuickJS runtime/context + host 指针 */
-typedef struct js_timer js_timer;
-struct js_timer {
-  int tid;
-  uint64_t deadline;  /* host clock 单调毫秒 */
-  JSValue fn;         /* 强引用 */
-  js_timer *next;
-};
+/* 无 js_exec_ms_limit 时的回执等待上限。与控制面 ctl_extract 的缺省
+ * timeout_ms(5000)对齐:回执条目超期会被判 TIMEOUT 并从表里摘掉,宿主再等也
+ * 等不到,只会白等一个 timeout。 */
+#define JS_CTL_DEFAULT_TIMEOUT_MS 5000
 
 typedef struct {
-  JSRuntime *rt;
-  JSContext *ctx;
-  tb_browser *host;  /* NULL = 无 host(console/timer 是 no-op) */
-  js_timer *timers;
-  int next_tid;
-  /* 脚本执行超时(js_exec_ms_limit)的中断状态 */
-  const tb_clock *isr_clock;
-  uint64_t isr_start_ms;
-  uint32_t isr_limit_ms;
+  qz_t *rt;
+  tb_browser *host;      /* NULL = 无 host(console 只入队,不派发) */
+  uint32_t correl_seq;
+  uint32_t limit_ms;     /* js_exec_ms_limit;0 = 用 JS_CTL_DEFAULT_TIMEOUT_MS */
 } js_handle;
 
-/* ---- interrupt handler:js_exec_ms_limit 超时 → 中断当前 JS 执行 ---- */
-static int js_interrupt_handler(JSRuntime *rt, void *opaque) {
-  (void)rt;
-  js_handle *h = (js_handle *)opaque;
-  if (!h || h->isr_limit_ms == 0) return 0;
-  return h->isr_clock->now_ms(h->isr_clock) - h->isr_start_ms >= h->isr_limit_ms;
-}
+/* ===================================================================
+ * JSON helpers
+ * =================================================================== */
 
-/* 每次 JS 执行前重置超时窗口 */
-static void js_isr_reset(js_handle *h) {
-  if (h && h->isr_clock) h->isr_start_ms = h->isr_clock->now_ms(h->isr_clock);
-}
-
-/* ---- helper: JSValue → malloc'd C string ---- */
-static char *js_to_cstring(JSContext *ctx, JSValue v) {
-  if (JS_IsException(v)) {
-    JSValue exc = JS_GetException(ctx);
-    const char *msg = JS_ToCString(ctx, exc);
-    size_t len = strlen(msg);
-    char *buf = malloc(len + 1);
-    memcpy(buf, msg, len + 1);
-    JS_FreeCString(ctx, msg);
-    JS_FreeValue(ctx, exc);
-    return buf;
-  }
-  const char *s = JS_ToCString(ctx, v);
-  if (!s) return strdup("");
-  size_t len = strlen(s);
-  char *buf = malloc(len + 1);
-  memcpy(buf, s, len + 1);
-  JS_FreeCString(ctx, s);
-  return buf;
-}
-
-/* ---- __tb_console(level, msg) bridge ---- */
-static JSValue js___tb_console(JSContext *ctx, JSValueConst this_val,
-                               int argc, JSValueConst *argv) {
-  js_handle *h = JS_GetContextOpaque(ctx);
-  if (!h || !h->host) return JS_UNDEFINED;
-
-  const char *level = JS_ToCString(ctx, argv[0]);
-  const char *msg = JS_ToCString(ctx, argv[1]);
-  if (h->host->cfg.on_console) {
-    h->host->cfg.on_console(h->host, level, msg, h->host->cfg.ud);
-  }
-  JS_FreeCString(ctx, level);
-  JS_FreeCString(ctx, msg);
-  return JS_UNDEFINED;
-}
-
-/* ---- __tb_timer_set(delay_ms, fn) bridge:返回 tid(int) ---- */
-static JSValue js___tb_timer_set(JSContext *ctx, JSValueConst this_val,
-                                 int argc, JSValueConst *argv) {
-  js_handle *h = JS_GetContextOpaque(ctx);
-  if (!h) return JS_UNDEFINED;
-
-  int32_t delay = 0;
-  JS_ToInt32(ctx, &delay, argv[0]);
-
-  js_timer *t = calloc(1, sizeof(js_timer));
-  if (!t) return JS_EXCEPTION;
-  t->tid = h->next_tid++;
-  if (h->host && h->host->cfg.clock) {
-    t->deadline = h->host->cfg.clock->now_ms(h->host->cfg.clock) + delay;
-  } else {
-    t->deadline = tb_clock_real.now_ms(&tb_clock_real) + delay;
-  }
-  t->fn = JS_DupValue(ctx, argv[1]);
-  t->next = h->timers;
-  h->timers = t;
-  return JS_NewInt32(ctx, t->tid);
-}
-
-/* ---- __tb_timer_cancel(tid) ---- */
-static JSValue js___tb_timer_cancel(JSContext *ctx, JSValueConst this_val,
-                                    int argc, JSValueConst *argv) {
-  js_handle *h = JS_GetContextOpaque(ctx);
-  if (!h) return JS_UNDEFINED;
-  int32_t tid = 0;
-  JS_ToInt32(ctx, &tid, argv[0]);
-  js_timer **pp = &h->timers;
-  while (*pp) {
-    js_timer *t = *pp;
-    if (t->tid == tid) {
-      *pp = t->next;
-      JS_FreeValue(ctx, t->fn);
-      free(t);
-      return JS_NewBool(ctx, 1);
+/* 把任意字节转成可嵌入 JSON 字符串字面量的转义形式(不含外层引号)。
+ * 控制字符走 \u00XX,UTF-8 多字节序列原样透传(合法 JSON)。 */
+static char *json_escape(const char *s, size_t len) {
+  static const char hex[] = "0123456789abcdef";
+  /* 最坏情况:每个字节都成 \u00XX(6 字节) */
+  char *out = (char *)malloc(len * 6 + 1);
+  if (!out) return NULL;
+  size_t o = 0;
+  for (size_t i = 0; i < len; i++) {
+    unsigned char c = (unsigned char)s[i];
+    switch (c) {
+      case '"':  out[o++] = '\\'; out[o++] = '"';  break;
+      case '\\': out[o++] = '\\'; out[o++] = '\\'; break;
+      case '\b': out[o++] = '\\'; out[o++] = 'b';  break;
+      case '\f': out[o++] = '\\'; out[o++] = 'f';  break;
+      case '\n': out[o++] = '\\'; out[o++] = 'n';  break;
+      case '\r': out[o++] = '\\'; out[o++] = 'r';  break;
+      case '\t': out[o++] = '\\'; out[o++] = 't';  break;
+      default:
+        if (c < 0x20) {
+          out[o++] = '\\'; out[o++] = 'u'; out[o++] = '0'; out[o++] = '0';
+          out[o++] = hex[(c >> 4) & 0xF]; out[o++] = hex[c & 0xF];
+        } else {
+          out[o++] = (char)c;
+        }
     }
-    pp = &t->next;
   }
-  return JS_NewBool(ctx, 0);
+  out[o] = '\0';
+  return out;
 }
 
-/* ---- __tb_load_sync(url) bridge (nested pump) ---- */
-static JSValue js___tb_load_sync(JSContext *ctx, JSValueConst this_val,
-                                 int argc, JSValueConst *argv) {
-  js_handle *h = JS_GetContextOpaque(ctx);
-  if (!h || !h->host) {
-    return JS_ThrowTypeError(ctx, "__tb_load_sync: no host");
-  }
-  const char *url = JS_ToCString(ctx, argv[0]);
-  char *body = NULL;
-  tb_err err = tb_load_sync(h->host, url, &body);
-  JS_FreeCString(ctx, url);
-  if (err.code != 0) {
-    free(body);
-    return JS_ThrowTypeError(ctx, "load failed: %s", err.msg);
-  }
-  JSValue ret = JS_NewString(ctx, body ? body : "");
-  free(body);
-  return ret;
+/* JSON 字符串字面量(含外层引号)。 */
+static char *json_string(const char *s, size_t len) {
+  char *esc = json_escape(s, len);
+  if (!esc) return NULL;
+  size_t n = strlen(esc);
+  char *out = (char *)malloc(n + 3);
+  if (!out) { free(esc); return NULL; }
+  out[0] = '"';
+  memcpy(out + 1, esc, n);
+  out[n + 1] = '"';
+  out[n + 2] = '\0';
+  free(esc);
+  return out;
 }
 
-/* ---- __tb_eval_js(code) bridge (over browser) ---- */
-static JSValue js___tb_eval_js(JSContext *ctx, JSValueConst this_val,
-                               int argc, JSValueConst *argv) {
-  js_handle *h = JS_GetContextOpaque(ctx);
-  if (!h || !h->host) {
-    return JS_ThrowTypeError(ctx, "__tb_eval_js: no host");
+/* cJSON 值 → malloc'd 字符串。字符串取其内容,其余(number/bool/object/…)
+ * 取其 JSON 文本 —— 与旧实现 JS_ToCString 的观感一致。 */
+static char *jsonval_to_cstr(const cJSON *v) {
+  if (!v) return strdup("");
+  if (cJSON_IsString(v)) return strdup(v->valuestring ? v->valuestring : "");
+  char *s = cJSON_PrintUnformatted(v);
+  char *r = strdup(s ? s : "");
+  cJSON_free(s);
+  return r;
+}
+
+static int now_ms(const js_handle *h) {
+  if (h->host && h->host->cfg.clock) return (int)h->host->cfg.clock->now_ms(h->host->cfg.clock);
+  return (int)tb_clock_real.now_ms(&tb_clock_real);
+}
+
+/* ===================================================================
+ * console 桥:JS postMessage → 宿主 cfg.on_console
+ * =================================================================== */
+
+static void js_drain_one(js_handle *h, char *json) {
+  if (!json) return;
+  cJSON *root = cJSON_Parse(json);
+  if (root) {
+    /* level/msg 嵌在 __tb_console 对象**里面**,不是在顶层 —— 从 root 上取
+     * 只会拿到 NULL,静默丢掉整条 console 消息。 */
+    const cJSON *c = cJSON_GetObjectItemCaseSensitive(root, "__tb_console");
+    const cJSON *lv = c ? cJSON_GetObjectItemCaseSensitive(c, "level") : NULL;
+    const cJSON *mg = c ? cJSON_GetObjectItemCaseSensitive(c, "msg") : NULL;
+    if (cJSON_IsObject(c) && cJSON_IsString(lv) && cJSON_IsString(mg) && h->host &&
+        h->host->cfg.on_console) {
+      h->host->cfg.on_console(h->host, lv->valuestring, mg->valuestring,
+                              h->host->cfg.ud);
+    }
+    cJSON_Delete(root);
   }
-  const char *code = JS_ToCString(ctx, argv[0]);
+  qz_free_message(json);
+}
+
+/* ===================================================================
+ * 控制面往返:发命令 → 阻塞等回执(途中把 console 消息派发掉)
+ * =================================================================== */
+
+/* 成功返回 malloc'd 回执 JSON(调用者 free);失败返回 NULL。
+ * 非回执的邮箱消息(console)就地消费后继续等。 */
+static char *js_ctl(js_handle *h, const char *cmd, int timeout_ms) {
+  if (!h || !h->rt || !cmd) return NULL;
+  if (qz_control(h->rt, cmd, strlen(cmd)) != 0) return NULL;
+
+  int waited = 0;
+  for (;;) {
+    int slice = timeout_ms - waited;
+    if (timeout_ms >= 0 && slice <= 0) {
+      /* 收据窗口用尽:投递 interrupt(无 correl 的 fire-and-forget 形态),
+       * 让引擎在下一个指令边界停下,并等它把异常回执吐出来。 */
+      qz_control(h->rt, "{\"op\":\"interrupt\"}", 20);
+      return NULL;
+    }
+    char *json = NULL;
+    size_t len = 0;
+    /* 剩余时间留 1ms 余量,免得最后一轮刚好踩到 qz 侧的超时判定。 */
+    int t = (timeout_ms < 0) ? -1 : (slice > 1 ? slice - 1 : 1);
+    int r = qz_recv_message(h->rt, &json, &len, t);
+    if (r == 1) {  /* 超时 */
+      if (timeout_ms < 0) continue;
+      qz_control(h->rt, "{\"op\":\"interrupt\"}", 20);
+      return NULL;
+    }
+    if (r < 0 || !json) return NULL;
+
+    int t0 = now_ms(h);
+    cJSON *root = cJSON_Parse(json);
+    int is_receipt = 0;
+    if (root) {
+      const cJSON *ctl = cJSON_GetObjectItemCaseSensitive(root, "ctl");
+      const cJSON *co = cJSON_GetObjectItemCaseSensitive(root, "correl");
+      /* correl 是回执唯一的配对依据,只认带 ctl:true + correl 的帧。 */
+      is_receipt = cJSON_IsTrue(ctl) && cJSON_IsString(co) && co->valuestring &&
+                   strstr(cmd, co->valuestring) != NULL;
+    }
+    if (is_receipt) {
+      cJSON_Delete(root);
+      return json;  /* 调用者负责 qz_free_message */
+    }
+    cJSON_Delete(root);
+    js_drain_one(h, json);
+    waited += now_ms(h) - t0;
+  }
+}
+
+static int js_ctl_timeout(const js_handle *h) {
+  return h->limit_ms > 0 ? (int)h->limit_ms : JS_CTL_DEFAULT_TIMEOUT_MS;
+}
+
+/* op:"eval" —— 求值并把结果转成字符串。*out = malloc'd 字符串。
+ * 返回 0 = 成功;-1 = JS 异常 / 控制面失败(两种情况 *out 都填错误串)。 */
+static int js_eval(js_handle *h, const char *code, size_t len, char **out) {
+  *out = NULL;
+  char *jstr = json_string(code, len);
+  if (!jstr) { *out = strdup("qzjs: out of memory"); return -1; }
+  char correl[24];
+  snprintf(correl, sizeof correl, "\"%u\"", ++h->correl_seq);
+
+  size_t need = strlen(jstr) + 128;
+  char *cmd = (char *)malloc(need);
+  snprintf(cmd, need,
+           "{\"op\":\"eval\",\"correl\":%s,\"timeout_ms\":%d,\"script\":%s}",
+           correl, js_ctl_timeout(h), jstr);
+  free(jstr);
+
+  char *receipt = js_ctl(h, cmd, js_ctl_timeout(h));
+  free(cmd);
+  if (!receipt) {
+    *out = strdup("qzjs: control round-trip failed");
+    return -1;
+  }
+
+  int rc = 0;
+  cJSON *root = cJSON_Parse(receipt);
+  const cJSON *ok = root ? cJSON_GetObjectItemCaseSensitive(root, "ok") : NULL;
+  if (cJSON_IsTrue(ok)) {
+    *out = jsonval_to_cstr(root ? cJSON_GetObjectItemCaseSensitive(root, "result") : NULL);
+  } else {
+    const cJSON *e = root ? cJSON_GetObjectItemCaseSensitive(root, "error") : NULL;
+    *out = jsonval_to_cstr(e);
+    rc = -1;
+  }
+  cJSON_Delete(root);
+  qz_free_message(receipt);
+  return rc;
+}
+
+/* op:"inspect" —— 求值 + JSON.stringify,回执的 json 字段是该 JSON 文本。 */
+static char *js_inspect(js_handle *h, const char *expr) {
+  char *jstr = json_string(expr, strlen(expr));
+  if (!jstr) return NULL;
+  char correl[24];
+  snprintf(correl, sizeof correl, "\"%u\"", ++h->correl_seq);
+
+  size_t need = strlen(jstr) + 128;
+  char *cmd = (char *)malloc(need);
+  snprintf(cmd, need,
+           "{\"op\":\"inspect\",\"correl\":%s,\"timeout_ms\":%d,\"expr\":%s}",
+           correl, js_ctl_timeout(h), jstr);
+  free(jstr);
+
+  char *receipt = js_ctl(h, cmd, js_ctl_timeout(h));
+  free(cmd);
+  if (!receipt) return NULL;
+
   char *out = NULL;
-  tb_err err = tb_eval_js(h->host, code, &out);
-  JS_FreeCString(ctx, code);
-  if (err.code != 0) {
-    free(out);
-    return JS_ThrowTypeError(ctx, "eval failed: %s", err.msg);
-  }
-  JSValue ret = JS_NewString(ctx, out ? out : "");
-  free(out);
-  return ret;
+  cJSON *root = cJSON_Parse(receipt);
+  const cJSON *j = root ? cJSON_GetObjectItemCaseSensitive(root, "json") : NULL;
+  if (cJSON_IsString(j) && j->valuestring) out = strdup(j->valuestring);
+  cJSON_Delete(root);
+  qz_free_message(receipt);
+  return out;
 }
 
-/* ---- __tb_view_dump(id) bridge ---- */
-static JSValue js___tb_view_dump(JSContext *ctx, JSValueConst this_val,
-                                 int argc, JSValueConst *argv) {
-  js_handle *h = JS_GetContextOpaque(ctx);
-  if (!h || !h->host || !h->host->view) {
-    return JS_NewString(ctx, "");
-  }
-  /* 从 argv[0] 取视图 id (当前忽略,返回整个 view dump) */
-  char *dump = tb_view_dump(h->host->view);
-  JSValue ret = JS_NewString(ctx, dump ? dump : "");
-  free(dump);
-  return ret;
-}
+/* ===================================================================
+ * JS 侧引导:console 桥 + 两段式文档加载器
+ * =================================================================== */
 
-/* ---- 文档加载器(JS):parse → attach 原型 → 同步执行 scripts → readyState=complete ----
-   作为全局函数 _tb_load_document 在 open 时注入;load_document 用 JS_Call 传入 body
-   (JS_NewStringLen,不做字符串拼接/转义)。 */
-static const char *TB_LOADER_SRC =
-  "var _tb_load_document = function (body) {"
+/* console 桥:qzjs 永不回调宿主,所以 console 输出走 postMessage 进邮箱,
+ * 由宿主 poll_timers / 控制面往返途中派发到 cfg.on_console。
+ *
+ * 两段式加载器:qzjs 没有同步宿主回调,所以 <script src> 无法像旧实现那样
+ * 在 JS 里 __tb_load_sync 回来。改成宿主先批量抓取:
+ *   __tb_begin_load(body)  → 解析 + 挂原型,把待跑脚本存下,返回 src 列表(JSON)
+ *   __tb_finish_load(map)  → 按 map 补齐 src 正文,逐个隔离执行,置 readyState
+ * 解析只做一次(begin 里就把脚本全收进 __tb_pending)。
+ */
+static const char *TB_BOOT_SRC =
+  "var __tb_fmt = function (a) {"
+  "  var out = [];"
+  "  for (var i = 0; i < a.length; i++) {"
+  "    var v = a[i];"
+  "    if (typeof v === 'string') out.push(v);"
+  "    else { try { out.push(JSON.stringify(v)); } catch (e) { out.push(String(v)); } }"
+  "  }"
+  "  return out.join(' ');"
+  "};"
+  "var __tb_console = {};"
+  "['log', 'info', 'warn', 'error', 'debug'].forEach(function (lv) {"
+  "  __tb_console[lv] = function () {"
+  "    var m = __tb_fmt(arguments);"
+  "    try { postMessage({ __tb_console: { level: lv, msg: m } }); } catch (e) {}"
+  "    if (lv === 'error' || lv === 'warn') {"
+  "      try { if (globalThis.__tb_stderr) globalThis.__tb_stderr(lv, m); } catch (e) {}"
+  "    }"
+  "  };"
+  "});"
+  "try { globalThis.console = __tb_console; } catch (e) {}"
+  "var __tb_pending = [];"
+  "var __tb_root = null;"
+  "var __tb_doc = null;"
+  /* 阶段一:解析 + 收集脚本。返回 src 数组(值,不是 JSON 文本——宿主用
+   * op:"inspect" 取回,inspect 自带 JSON.stringify,这里再 stringify 会双编码)。 */
+  "var __tb_begin_load = function (body) {"
   "  var p = _tb_parser.make();"
   "  p.feed(body);"
   "  p.finalize();"
   "  document._tb_attach(p.root);"
   "  _tb_parser._readyState = 'loading';"
-  "  var s;"
+  "  __tb_pending = [];"
+  "  var srcs = [], s;"
   "  while ((s = p.next_script()) !== null) {"
-  "    var code = null;"
-  "    try { code = s.src ? __tb_load_sync(s.src) : s.text; } catch (e) {}"
+  "    __tb_pending.push({ src: s.src || null, text: s.src ? null : s.text });"
+  "    if (s.src) srcs.push(s.src);"
+  "  }"
+  "  __tb_root = p.root;"
+  "  return srcs;"
+  "};"
+  /* 阶段二:宿主已把 src 正文放进 map,逐个隔离执行。 */
+  "var __tb_finish_load = function (map) {"
+  "  for (var i = 0; i < __tb_pending.length; i++) {"
+  "    var it = __tb_pending[i];"
+  "    var code = it.src ? (Object.prototype.hasOwnProperty.call(map, it.src) ? map[it.src] : null)"
+  "                     : it.text;"
   "    if (!code) continue;"
   "    try { (0, eval)(code); }"
   "    catch (e) {"
-  "      __tb_console('warn', 'script error: ' + (e && e.message ? e.message : String(e)));"
+  "      __tb_console.warn('script error: ' + (e && e.message ? e.message : String(e)));"
   "    }"
   "  }"
+  "  __tb_pending = [];"
   "  _tb_parser._readyState = 'complete';"
-  "  return p.root;"
+  "  __tb_doc = __tb_root;"
+  "  return true;"
   "};";
 
-/* ---- 内置函数注册 ---- */
-static const JSCFunctionListEntry js_global_funcs[] = {
-  JS_CFUNC_DEF("__tb_console", 2, js___tb_console),
-  JS_CFUNC_DEF("__tb_timer_set", 2, js___tb_timer_set),
-  JS_CFUNC_DEF("__tb_timer_cancel", 1, js___tb_timer_cancel),
-  JS_CFUNC_DEF("__tb_load_sync", 1, js___tb_load_sync),
-  JS_CFUNC_DEF("__tb_eval_js", 1, js___tb_eval_js),
-  JS_CFUNC_DEF("__tb_view_dump", 1, js___tb_view_dump),
-};
+/* ===================================================================
+ * engine impl
+ * =================================================================== */
 
-/* ---- engine impl: open ---- */
 static void *js_engine_open(const struct tb_js_engine *self, tb_browser *host) {
   (void)self;
-  js_handle *h = calloc(1, sizeof(js_handle));
+  js_handle *h = (js_handle *)calloc(1, sizeof(js_handle));
   if (!h) return NULL;
-
-  /* 从 host 获取内存限制;默认 4MB */
-  size_t mem_limit = 4 * 1024 * 1024;
-  if (host && host->cfg.js_memory_limit > 0) {
-    mem_limit = host->cfg.js_memory_limit;
-  }
-
-  h->rt = JS_NewRuntime();
-  if (!h->rt) { free(h); return NULL; }
-  JS_SetMaxStackSize(h->rt, 1024 * 1024);  /* 1MB 栈 */
-  /* 注意:JS_SetMemoryLimit 在 builtins 注入之后再设(见下方)——
-     引擎自身 builtins(dom.js/parser.js/render.js ~27KB)不应受用户
-     配置的文档内存限制约束;限制约束文档加载期(脚本)与运行期。 */
-
-  /* js_exec_ms_limit 超时中断:opaque 传 js_handle,执行前 js_isr_reset 重置窗口 */
-  h->isr_clock = (host && host->cfg.clock) ? host->cfg.clock : &tb_clock_real;
-  h->isr_limit_ms = host ? host->cfg.js_exec_ms_limit : 0;
-  JS_SetInterruptHandler(h->rt, js_interrupt_handler, h);
-
-  h->ctx = JS_NewContext(h->rt);
-  if (!h->ctx) { JS_FreeRuntime(h->rt); free(h); return NULL; }
-
   h->host = host;
-  JS_SetContextOpaque(h->ctx, h);
+  h->limit_ms = host ? host->cfg.js_exec_ms_limit : 0;
 
-  /* 注册全局桥函数 */
-  JSValue global_obj = JS_GetGlobalObject(h->ctx);
-  JS_SetPropertyFunctionList(h->ctx, global_obj, js_global_funcs,
-                             sizeof(js_global_funcs) / sizeof(js_global_funcs[0]));
-  JS_FreeValue(h->ctx, global_obj);
-
-  /* 加载内置 JS (dom.js + parser.js + render.js) */
+  /* 引导脚本 = 内置 JS(dom/parser/render) + 桥与加载器 */
+  size_t cap = strlen(TB_BOOT_SRC) + 1;
+  for (int i = 0; tb_js_builtins[i] != NULL; i++) cap += strlen(tb_js_builtins[i]) + 1;
+  char *boot = (char *)malloc(cap);
+  if (!boot) { free(h); return NULL; }
+  size_t o = 0;
   for (int i = 0; tb_js_builtins[i] != NULL; i++) {
-    JSValue val = JS_Eval(h->ctx, tb_js_builtins[i], strlen(tb_js_builtins[i]),
-                          "<builtins>", JS_EVAL_TYPE_GLOBAL);
-    if (JS_IsException(val)) {
-      JSValue exc = JS_GetException(h->ctx);
-      const char *msg = JS_ToCString(h->ctx, exc);
-      fprintf(stderr, "[js_engine] builtins load error: %s\n", msg);
-      JS_FreeCString(h->ctx, msg);
-      JS_FreeValue(h->ctx, exc);
-    }
-    JS_FreeValue(h->ctx, val);
+    size_t n = strlen(tb_js_builtins[i]);
+    memcpy(boot + o, tb_js_builtins[i], n);
+    o += n;
+    boot[o++] = '\n';
   }
+  memcpy(boot + o, TB_BOOT_SRC, strlen(TB_BOOT_SRC));
+  o += strlen(TB_BOOT_SRC);
+  boot[o] = '\0';
 
-  /* 注入文档加载器 _tb_load_document(body):parse + attach + 同步执行脚本 */
-  JSValue loader = JS_Eval(h->ctx, TB_LOADER_SRC, strlen(TB_LOADER_SRC),
-                           "<loader>", JS_EVAL_TYPE_GLOBAL);
-  if (JS_IsException(loader)) {
-    JSValue exc = JS_GetException(h->ctx);
-    const char *msg = JS_ToCString(h->ctx, exc);
-    fprintf(stderr, "[js_engine] loader load error: %s\n", msg);
-    JS_FreeCString(h->ctx, msg);
-    JS_FreeValue(h->ctx, exc);
+  qz_config_t cfg;
+  qz_config_init(&cfg);
+  cfg.control_plane = QZ_CONTROL_IN_PROC;  /* 默认 OFF 会让 qz_control 恒 -1 */
+  /* 跑的是第三方网页脚本:strict 挡住 fs 限根逃逸、processSpawn 与 env 注入。
+   * sandbox_root / env_allowlist 留 NULL → strict 下拒绝一切 fs、不注入 env。 */
+  cfg.strict_mode = 1;
+  cfg.initial_script = boot;
+
+  h->rt = qz_create(&cfg);
+  free(boot);
+  if (!h->rt) {
+    fprintf(stderr, "[js_engine] qz_create failed (abi %u)\n", qz_abi_version());
+    free(h);
+    return NULL;
   }
-  JS_FreeValue(h->ctx, loader);
-
-  /* 引擎注入完成,收紧到用户配置的内存上限(默认 4MB)。
-     文档加载期(load_document 的脚本)与运行期以此限制;超限 → JS exception。 */
-  JS_SetMemoryLimit(h->rt, mem_limit);
-
   return h;
 }
 
-/* ---- engine impl: eval ---- */
 static int js_engine_eval(const struct tb_js_engine *self, void *handle,
                           const char *code, char **out) {
   (void)self;
   js_handle *h = (js_handle *)handle;
-  if (!h || !h->ctx) return -1;
-
-  js_isr_reset(h);  /* 单次 eval 的执行时间预算从本次开始计时 */
-  JSValue result = JS_Eval(h->ctx, code, strlen(code), "<eval>", JS_EVAL_TYPE_GLOBAL);
-  int is_exc = JS_IsException(result);
-  *out = js_to_cstring(h->ctx, result);  /* 异常时返回异常消息字符串 */
-  JS_FreeValue(h->ctx, result);
-  return is_exc ? -1 : 0;
+  if (!h || !h->rt || !code || !out) return -1;
+  return js_eval(h, code, strlen(code), out);
 }
 
-/* ---- engine impl: close ---- */
 static void js_engine_close(const struct tb_js_engine *self, void *handle) {
   (void)self;
   js_handle *h = (js_handle *)handle;
   if (!h) return;
-  if (h->ctx) {
-    js_timer *t = h->timers;
-    while (t) {
-      js_timer *nx = t->next;
-      JS_FreeValue(h->ctx, t->fn);
-      free(t);
-      t = nx;
-    }
-  }
-  if (h->ctx) JS_FreeContext(h->ctx);
-  if (h->rt) JS_FreeRuntime(h->rt);
+  if (h->rt) qz_destroy(h->rt);
   free(h);
 }
 
-/* ---- engine impl: load_document ---- */
+/* 两段式:begin → 宿主抓 src → finish */
 static int js_engine_load_document(const struct tb_js_engine *self, void *handle,
                                    const char *body, size_t len) {
   (void)self;
   js_handle *h = (js_handle *)handle;
-  if (!h || !h->ctx) return -1;
+  if (!h || !h->rt) return -1;
 
-  /* 调用全局 _tb_load_document(body):parse + attach + 脚本执行(见 TB_LOADER_SRC) */
-  js_isr_reset(h);  /* 文档解析+脚本执行共享 js_exec_ms_limit 预算 */
-  JSValue global = JS_GetGlobalObject(h->ctx);
-  JSValue fn = JS_GetPropertyStr(h->ctx, global, "_tb_load_document");
-  JS_FreeValue(h->ctx, global);
-  if (JS_IsUndefined(fn) || JS_IsException(fn)) {
-    JS_FreeValue(h->ctx, fn);
+  /* 阶段一:__tb_begin_load(body) → src 列表(JSON 字符串) */
+  char *jbody = json_string(body ? body : "", len);
+  if (!jbody) return -1;
+  size_t need = strlen(jbody) + 64;
+  char *expr = (char *)malloc(need);
+  snprintf(expr, need, "__tb_begin_load(%s)", jbody);
+  free(jbody);
+
+  char *srcs_json = js_inspect(h, expr);
+  free(expr);
+  if (!srcs_json) {
+    fprintf(stderr, "[js_engine] load: begin failed\n");
     return -1;
   }
 
-  JSValue js_body = JS_NewStringLen(h->ctx, body, len);
-  JSValue args[] = { js_body };
-  JSValue result = JS_Call(h->ctx, fn, JS_UNDEFINED, 1, args);
-  JS_FreeValue(h->ctx, fn);
-  JS_FreeValue(h->ctx, js_body);
+  /* 阶段二:宿主把每个 <script src> 同步抓下来(复用既有 tb_load_sync)。
+   * srcs_json 是 js_inspect 里 strdup 出来的堆串,归本函数 free。 */
+  char *map = strdup("{}");
+  cJSON *srcs = cJSON_Parse(srcs_json);
+  if (srcs && cJSON_IsArray(srcs)) {
+    cJSON *it = NULL;
+    cJSON_ArrayForEach(it, srcs) {
+      if (!cJSON_IsString(it) || !it->valuestring) continue;
+      char *code = NULL;
+      tb_err err = h->host ? tb_load_sync(h->host, it->valuestring, &code) : (tb_err){0};
+      if (err.code == 0 && code) {
+        char *k = json_string(it->valuestring, strlen(it->valuestring));
+        char *v = json_string(code, strlen(code));
+        if (k && v) {
+          char *bigger = (char *)malloc(strlen(map) + strlen(k) + strlen(v) + 4);
+          sprintf(bigger, "%s,%s:%s", map, k, v);
+          free(map);
+          map = bigger;
+        }
+        free(k);
+        free(v);
+      }
+      free(code);
+    }
+  }
+  cJSON_Delete(srcs);
+  free(srcs_json);
+  map[strlen(map) - 1] = '}';  /* 把尾 ',' 换成 '}' */
 
-  if (JS_IsException(result)) {
-    JSValue exc = JS_GetException(h->ctx);
-    const char *msg = JS_ToCString(h->ctx, exc);
-    fprintf(stderr, "[js_engine] load error: %s\n", msg);
-    JS_FreeCString(h->ctx, msg);
-    JS_FreeValue(h->ctx, exc);
-    JS_FreeValue(h->ctx, result);
+  /* 阶段三:__tb_finish_load(map) → 跑脚本 + 置 readyState */
+  size_t n2 = strlen(map) + 64;
+  char *expr2 = (char *)malloc(n2);
+  snprintf(expr2, n2, "__tb_finish_load(%s)", map);
+  free(map);
+
+  char *res = NULL;
+  int rc = js_eval(h, expr2, strlen(expr2), &res);
+  free(expr2);
+  free(res);
+  if (rc != 0) {
+    fprintf(stderr, "[js_engine] load: finish failed\n");
     return -1;
   }
-
-  /* 保存树根到全局 _tb_current_doc。
-     注意:quickjs-ng 的 JS_SetPropertyStr 取走 val 的“所有权”——
-     内部 set_value 只释放旧值、不复制新值,设置成功后调用者不得再
-     JS_FreeValue(result)(否则属性悬空,GC 时 gc_decref_child 断言崩溃)。
-     已在 deps/quickjs-ng 上实测:SetProperty 后再 FreeValue(val) 段错误。 */
-  JSValue global2 = JS_GetGlobalObject(h->ctx);
-  JS_SetPropertyStr(h->ctx, global2, "_tb_current_doc", result);
-  JS_FreeValue(h->ctx, global2);
   return 0;
 }
 
-/* ---- engine impl: render ---- */
 static int js_engine_render(const struct tb_js_engine *self, void *handle,
                             const char *url, int status, struct tb_view *out) {
   (void)self;
   js_handle *h = (js_handle *)handle;
-  if (!h || !h->ctx || !out) return -1;
+  if (!h || !h->rt || !out) return -1;
 
-  /* 获取 _tb_current_doc */
-  JSValue global = JS_GetGlobalObject(h->ctx);
-  JSValue doc = JS_GetPropertyStr(h->ctx, global, "_tb_current_doc");
-  JS_FreeValue(h->ctx, global);
-
-  if (JS_IsUndefined(doc)) return -1;
-
-  /* 调用 tb_render_js(doc, url, status) */
-  JSValue fn = JS_Eval(h->ctx, "tb_render_js", 11, "<render>", JS_EVAL_TYPE_GLOBAL);
-  if (JS_IsUndefined(fn) || JS_IsException(fn)) {
-    JS_FreeValue(h->ctx, fn);
-    JS_FreeValue(h->ctx, doc);
+  /* __tb_doc 若为 null 说明没加载过文档。用 eval(op:"eval" 不 stringify,
+   * 原样拿布尔);inspect 会把 true 变成 JSON 文本 "true",再被回执编码成
+   * "\"true\"",直接 strcmp 会误判成未加载。 */
+  static const char TB_HAS_DOC_EXPR[] = "String(__tb_doc !== null)";
+  char *has = NULL;
+  if (js_eval(h, TB_HAS_DOC_EXPR, sizeof(TB_HAS_DOC_EXPR) - 1, &has) != 0 || !has) {
+    free(has);
     return -1;
   }
-  JSValue js_url = JS_NewString(h->ctx, url ? url : "");
-  JSValue js_status = JS_NewInt32(h->ctx, status);
-  JSValue args[] = { doc, js_url, js_status };
-  JSValue result = JS_Call(h->ctx, fn, JS_UNDEFINED, 3, args);
-  JS_FreeValue(h->ctx, fn);
-  JS_FreeValue(h->ctx, js_url);
-  JS_FreeValue(h->ctx, js_status);
-  JS_FreeValue(h->ctx, doc);
+  int loaded = strcmp(has, "true") == 0;
+  free(has);
+  if (!loaded) return -1;
 
-  if (JS_IsException(result)) {
-    JSValue exc = JS_GetException(h->ctx);
-    const char *msg = JS_ToCString(h->ctx, exc);
-    fprintf(stderr, "[js_engine] render error: %s\n", msg);
-    JS_FreeCString(h->ctx, msg);
-    JS_FreeValue(h->ctx, exc);
-    JS_FreeValue(h->ctx, result);
+  /* tb_render_js(doc, url, status) → JSON.stringify → 宿主填 tb_view。
+   * 走 inspect 而非 eval:inspect 自带 JSON.stringify,省掉在 JS 侧拼
+   * JSON.stringify 的那层包装。 */
+  char *jurl = json_string(url ? url : "", url ? strlen(url) : 0);
+  if (!jurl) return -1;
+  size_t need = strlen(jurl) + 96;
+  char *expr = (char *)malloc(need);
+  snprintf(expr, need, "tb_render_js(__tb_doc, %s, %d)", jurl, status);
+  free(jurl);
+
+  char *json = js_inspect(h, expr);
+  free(expr);
+  if (!json) {
+    fprintf(stderr, "[js_engine] render failed\n");
     return -1;
   }
 
-  /* 从结果对象提取 text, title, status, elems */
-  JSValue js_text = JS_GetPropertyStr(h->ctx, result, "text");
-  JSValue js_title = JS_GetPropertyStr(h->ctx, result, "title");
-  JSValue js_st = JS_GetPropertyStr(h->ctx, result, "status");
-  JSValue js_elems = JS_GetPropertyStr(h->ctx, result, "elems");
+  cJSON *root = cJSON_Parse(json);
+  free(json);
+  if (!root) return -1;
 
-  const char *text = JS_ToCString(h->ctx, js_text);
-  const char *title = JS_ToCString(h->ctx, js_title);
-  int32_t st = 0;
-  JS_ToInt32(h->ctx, &st, js_st);
+  const cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "text");
+  const cJSON *ti = cJSON_GetObjectItemCaseSensitive(root, "title");
+  const cJSON *st = cJSON_GetObjectItemCaseSensitive(root, "status");
+  const cJSON *el = cJSON_GetObjectItemCaseSensitive(root, "elems");
 
   free(out->text);
   free(out->title);
   free(out->url);
-  out->text = strdup(text ? text : "");
-  out->title = strdup(title ? title : "");
-  out->url = strdup(url ? url : "");   /* seam 签名直接带 url 参数,勿依赖 JS 侧 */
-  out->status = st;
-
-  /* 解析 elems 数组 */
-  uint32_t nelems = 0;
-  JSValue js_len = JS_GetPropertyStr(h->ctx, js_elems, "length");
-  JS_ToUint32(h->ctx, &nelems, js_len);
-  JS_FreeValue(h->ctx, js_len);
+  out->text = strdup(cJSON_IsString(t) && t->valuestring ? t->valuestring : "");
+  out->title = strdup(cJSON_IsString(ti) && ti->valuestring ? ti->valuestring : "");
+  out->url = strdup(url ? url : "");
+  out->status = cJSON_IsNumber(st) ? st->valueint : 0;
 
   free(out->elems);
+  out->elems = NULL;
   out->nelems = 0;
-  if (nelems > 0) {
-    out->elems = calloc(nelems, sizeof(struct tb_elem));
-    for (uint32_t i = 0; i < nelems; i++) {
-      JSValue je = JS_GetPropertyUint32(h->ctx, js_elems, i);
-      JSValue je_id = JS_GetPropertyStr(h->ctx, je, "id");
-      JSValue je_type = JS_GetPropertyStr(h->ctx, je, "type");
-      JSValue je_text = JS_GetPropertyStr(h->ctx, je, "text");
-      JSValue je_href = JS_GetPropertyStr(h->ctx, je, "href");
-      JSValue je_name = JS_GetPropertyStr(h->ctx, je, "name");
-      JSValue je_value = JS_GetPropertyStr(h->ctx, je, "value");
-      JSValue je_off = JS_GetPropertyStr(h->ctx, je, "off");
-      /* select 的 options 数组(render.js 输出;M1 tb_render 等价物) */
-      JSValue je_options = JS_GetPropertyStr(h->ctx, je, "options");
-
-      int32_t eid = 0, eoff = 0;
-      JS_ToInt32(h->ctx, &eid, je_id);
-      JS_ToInt32(h->ctx, &eoff, je_off);
-      const char *etype = JS_ToCString(h->ctx, je_type);
-      const char *etext = JS_ToCString(h->ctx, je_text);
-      const char *ehref = JS_ToCString(h->ctx, je_href);
-      const char *ename = JS_ToCString(h->ctx, je_name);
-      const char *evalue = JS_ToCString(h->ctx, je_value);
-
-      struct tb_elem *e = &out->elems[out->nelems];
-      e->id = eid;
-      e->type = strdup(etype ? etype : "");
-      e->text = strdup(etext ? etext : "");
-      e->href = strdup(ehref ? ehref : "");
-      e->name = strdup(ename ? ename : "");
-      e->value = strdup(evalue ? evalue : "");
-      e->off = eoff;
-
-      /* 展开 options 数组到 e->options / e->noptions(M1 语义:select 的选项) */
-      uint32_t nopts = 0, opt_len = 0;
-      e->noptions = 0;
-      e->options = NULL;
-      if (JS_IsArray(je_options)) {
-        JSValue jol = JS_GetPropertyStr(h->ctx, je_options, "length");
-        JS_ToUint32(h->ctx, &opt_len, jol);
-        JS_FreeValue(h->ctx, jol);
-        if (opt_len > 0) {
-          e->options = calloc(opt_len, sizeof(char *));
-          for (uint32_t o = 0; o < opt_len; o++) {
-            JSValue jo = JS_GetPropertyUint32(h->ctx, je_options, o);
-            const char *os = JS_ToCString(h->ctx, jo);
-            e->options[e->noptions++] = strdup(os ? os : "");
-            JS_FreeCString(h->ctx, os);
-            JS_FreeValue(h->ctx, jo);
+  if (cJSON_IsArray(el)) {
+    int n = cJSON_GetArraySize(el);
+    if (n > 0) {
+      out->elems = (struct tb_elem *)calloc((size_t)n, sizeof(struct tb_elem));
+      for (int i = 0; i < n; i++) {
+        const cJSON *e = cJSON_GetArrayItem(el, i);
+        struct tb_elem *o = &out->elems[out->nelems];
+        const cJSON *f;
+        f = cJSON_GetObjectItemCaseSensitive(e, "id");
+        o->id = cJSON_IsNumber(f) ? f->valueint : 0;
+        f = cJSON_GetObjectItemCaseSensitive(e, "off");
+        o->off = cJSON_IsNumber(f) ? f->valueint : 0;
+        f = cJSON_GetObjectItemCaseSensitive(e, "type");
+        o->type = strdup(cJSON_IsString(f) && f->valuestring ? f->valuestring : "");
+        f = cJSON_GetObjectItemCaseSensitive(e, "text");
+        o->text = strdup(cJSON_IsString(f) && f->valuestring ? f->valuestring : "");
+        f = cJSON_GetObjectItemCaseSensitive(e, "href");
+        o->href = strdup(cJSON_IsString(f) && f->valuestring ? f->valuestring : "");
+        f = cJSON_GetObjectItemCaseSensitive(e, "name");
+        o->name = strdup(cJSON_IsString(f) && f->valuestring ? f->valuestring : "");
+        f = cJSON_GetObjectItemCaseSensitive(e, "value");
+        o->value = strdup(cJSON_IsString(f) && f->valuestring ? f->valuestring : "");
+        /* select 的 options 数组 */
+        f = cJSON_GetObjectItemCaseSensitive(e, "options");
+        if (cJSON_IsArray(f)) {
+          int no = cJSON_GetArraySize(f);
+          if (no > 0) {
+            o->options = (const char **)calloc((size_t)no, sizeof(char *));
+            for (int k = 0; k < no; k++) {
+              const cJSON *o1 = cJSON_GetArrayItem(f, k);
+              o->options[o->noptions++] =
+                  strdup(cJSON_IsString(o1) && o1->valuestring ? o1->valuestring : "");
+            }
           }
         }
+        out->nelems++;
       }
-      out->nelems++;
-
-      JS_FreeCString(h->ctx, etype);
-      JS_FreeCString(h->ctx, etext);
-      JS_FreeCString(h->ctx, ehref);
-      JS_FreeCString(h->ctx, ename);
-      JS_FreeCString(h->ctx, evalue);
-      /* 必须先释放从 je 派生的子引用,再释放 je 本身,
-         否则 je 引用计数归零被回收后,子引用指向已回收值,
-         触发 quickjs gc_decref_child 断言(JS_REF_COUNT(p) > 0)。 */
-      JS_FreeValue(h->ctx, je_id);
-      JS_FreeValue(h->ctx, je_type);
-      JS_FreeValue(h->ctx, je_text);
-      JS_FreeValue(h->ctx, je_href);
-      JS_FreeValue(h->ctx, je_name);
-      JS_FreeValue(h->ctx, je_value);
-      JS_FreeValue(h->ctx, je_off);
-      JS_FreeValue(h->ctx, je_options);
-      JS_FreeValue(h->ctx, je);
     }
   }
-
-  JS_FreeCString(h->ctx, text);
-  JS_FreeCString(h->ctx, title);
-  JS_FreeValue(h->ctx, js_text);
-  JS_FreeValue(h->ctx, js_title);
-  JS_FreeValue(h->ctx, js_st);
-  JS_FreeValue(h->ctx, js_elems);
-  JS_FreeValue(h->ctx, result);
+  cJSON_Delete(root);
   return 0;
 }
 
-/* ---- engine impl: poll_timers ---- */
+/* qzjs 在自有线程上跑自己的 loop,定时器由它自己触发。宿主这侧只需把邮箱里
+ * 积压的 console 帧派发出去(否则 on_console 要等到下一次控制面往返才触发)。 */
 static void js_engine_poll_timers(const struct tb_js_engine *self, void *handle) {
   (void)self;
   js_handle *h = (js_handle *)handle;
-  if (!h || !h->ctx || !h->host) return;
-
-  uint64_t now = h->host->cfg.clock
-                   ? h->host->cfg.clock->now_ms(h->host->cfg.clock)
-                   : tb_clock_real.now_ms(&tb_clock_real);
-
-  js_timer *t = h->timers;
-  while (t) {
-    js_timer *nx = t->next;
-    if (t->deadline <= now) {
-      JSValue fn = JS_DupValue(h->ctx, t->fn);
-      /* 从链表中摘除 */
-      js_timer **pp = &h->timers;
-      while (*pp != t) pp = &(*pp)->next;
-      *pp = t->next;
-      JS_FreeValue(h->ctx, t->fn);
-      free(t);
-      JSValue r = JS_Call(h->ctx, fn, JS_UNDEFINED, 0, NULL);
-      if (JS_IsException(r)) {
-        JSValue exc = JS_GetException(h->ctx);
-        const char *msg = JS_ToCString(h->ctx, exc);
-        fprintf(stderr, "[js_engine] timer cb error: %s\n", msg);
-        JS_FreeCString(h->ctx, msg);
-        JS_FreeValue(h->ctx, exc);
-      }
-      JS_FreeValue(h->ctx, r);
-      JS_FreeValue(h->ctx, fn);
-    }
-    t = nx;
+  if (!h || !h->rt) return;
+  for (;;) {
+    char *json = NULL;
+    size_t len = 0;
+    if (qz_recv_message(h->rt, &json, &len, 0) != 0 || !json) break;
+    js_drain_one(h, json);
   }
 }
 
-/* ---- 引擎 vtable ---- */
 static const struct tb_js_engine impl = {
   .open = js_engine_open,
   .eval = js_engine_eval,

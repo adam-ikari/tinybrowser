@@ -86,8 +86,7 @@ typedef struct tb_config {
   const tb_transport *transport; /* NULL → 真实 curl 传输 */
   const tb_clock *clock;         /* NULL → tb_clock_real */
   void *ud;
-  int64_t js_memory_limit;              /* QuickJS 内存上限字节;0=默认 */
-  uint32_t js_exec_ms_limit;            /* 单脚本执行毫秒上限;0=不限制 */
+  uint32_t js_exec_ms_limit;            /* 单脚本执行毫秒上限(控制面回执窗口);0=默认 5000 */
   void (*on_console)(tb_browser *, const char *level, const char *msg, void *ud);
   const struct tb_js_engine *js_engine; /* NULL → 默认 quickjs engine */
 } tb_config;
