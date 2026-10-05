@@ -105,8 +105,28 @@ tb_err tb_load_sync(tb_browser *b, const char *url, char **out) {
   return (ctx.done && !ctx.failed) ? (tb_err){0, ""} : (tb_err){TB_ERR_TIMEOUT, "timeout"};
 }
 
-/* ---- 导航上下文:把传输回调桥接到浏览器状态 ---- */
-typedef struct {
+/* ---- 导航上下文:把传输回调桥接到浏览器状态 ----
+ *
+ * 生命周期分成两段,分界线是「传输回调内」与「pump 顶层」:
+ *
+ *   传输回调(on_headers/on_body/on_done)只搬数据、登记,不做任何引擎工作。
+ *   on_done 把 nav_ctx 挂进 b->nav_ready 队列就返回。
+ *   引擎侧的一切(load_document / render,以及 <script src> 触发的
+ *   tb_load_sync 子资源抓取)由 tb_pump 在循环顶层调 nav_commit 做。
+ *
+ * 为什么必须这样分:nav_on_done 原本直接在传输回调里跑引擎。传输回调是由
+ * curl_transport 的 check_multi_info 触发的,而它坐在 curl_multi_info_read
+ * 的 while 循环里 —— 也就是 curl_multi_socket_action 的栈上。于是
+ * <script src> 的抓取会在 curl 自己的循环内部调 curl_multi_add_handle /
+ * uv_run,重入 curl multi handle。这是 UB,而且表现为段错误或静默的状态错乱,
+ * 极难归因。
+ *
+ * 「pending 计数在 commit 时才递减」是配套的:若在 on_done 里就 nav_done,
+ * tb_session_idle 会变真,tb_pump 可能在 commit 之前就返回,调用方拿到的是
+ * 上一张视图。让 pending 一直挂到 commit 完成,pump 才可能判空闲。
+ */
+typedef struct nav_ctx {
+  struct nav_ctx *next;
   tb_browser *b;
   char *url;            /* 请求 URL */
   char *final_url;
@@ -115,6 +135,7 @@ typedef struct {
   int attachment;
   char *body; size_t body_len, body_cap;
   int done;
+  tb_err err;           /* on_done 带来的传输层结果 */
 } nav_ctx;
 
 static void nav_on_headers(void *ud, int status, const char *ct,
@@ -139,33 +160,66 @@ static void nav_on_body(void *ud, const char *data, size_t len) {
   c->body[c->body_len] = '\0';
 }
 
+/* 从「在飞」链表摘掉自己。摘不掉说明链表已被 tb_destroy 清空(不该发生:
+   传输层此刻仍持有 ud 指针,浏览器却已没了 —— 那是调用方的生命周期错误)。 */
+static void nav_unlink_inflight(nav_ctx *c) {
+  tb_browser *b = c->b;
+  nav_ctx **pp = &b->nav_inflight;
+  while (*pp) {
+    if (*pp == c) { *pp = c->next; return; }
+    pp = &(*pp)->next;
+  }
+}
+
 static void nav_on_done(void *ud, tb_err err) {
   nav_ctx *c = ud;
-  tb_browser *b = c->b;
   c->done = 1;
+  c->err = err;
+  tb_browser *b = c->b;
+  nav_unlink_inflight(c);
+  /* 登记即返回:引擎工作一律留给 nav_commit(pump 顶层)。见 nav_ctx 的注释。 */
+  c->next = NULL;
+  if (b->nav_ready_tail) b->nav_ready_tail->next = c;
+  else b->nav_ready = c;
+  b->nav_ready_tail = c;
+}
+
+/* ---- 提交:在 pump 顶层做引擎工作 ---- */
+
+/* 通知渲染失败的公共尾巴(错误码 + 消息)。 */
+static void nav_fail(tb_browser *b, int code, const char *msg,
+                     const char *url) {
+  tb_session_nav_fail(&b->session);
+  if (b->cfg.on_error) {
+    tb_err e = { 0, "" };
+    e.code = code;
+    snprintf(e.msg, sizeof e.msg, "%s", msg ? msg : "");
+    b->cfg.on_error(b, e, url, b->cfg.ud);
+  }
+}
+
+static void nav_commit_one(nav_ctx *c) {
+  tb_browser *b = c->b;
   const char *effective = c->final_url ? c->final_url : c->url;
-  if (err.code != 0) {
-    tb_session_nav_fail(&b->session);
-    if (b->cfg.on_error) b->cfg.on_error(b, err, c->url, b->cfg.ud);
-    goto out;
+  if (c->err.code != 0) {
+    nav_fail(b, c->err.code, c->err.msg, c->url);
+    goto done;
   }
   tb_content_kind kind = tb_content_classify(c->content_type, c->attachment);
   if (kind == TB_CONTENT_RENDER) {
     /* 引擎驱动(M2a):qzjs 解析 HTML、跑脚本、产出视图。不再有 C 侧 DOM 树——
-     * 交互(click/fill/select/submit)改为经控制面在 JS 自己的树上查询。 */
+     * 交互(click/fill/select/submit)改为经控制面在 JS 自己的树上查询。
+     * load_document 内部可能同步抓 <script src> 子资源(tb_load_sync),
+     * 它自己会 pump 传输 —— 这正是必须待在 pump 顶层的原因。 */
     if (b->engine->load_document(b->engine, b->js_doc, c->body, c->body_len, effective) != 0) {
-      tb_session_nav_fail(&b->session);
-      tb_err pe = { TB_ERR_PARSE, "document load failed" };
-      if (b->cfg.on_error) b->cfg.on_error(b, pe, effective, b->cfg.ud);
-      goto out;
+      nav_fail(b, TB_ERR_PARSE, "document load failed", effective);
+      goto done;
     }
     tb_view_free(b->view);
     b->view = tb_view_new();
     if (b->engine->render(b->engine, b->js_doc, effective, c->status, b->view) != 0) {
-      tb_session_nav_fail(&b->session);
-      tb_err pe = { TB_ERR_PARSE, "render failed" };
-      if (b->cfg.on_error) b->cfg.on_error(b, pe, effective, b->cfg.ud);
-      goto out;
+      nav_fail(b, TB_ERR_PARSE, "render failed", effective);
+      goto done;
     }
   } else {
     tb_view_free(b->view);
@@ -179,9 +233,23 @@ static void nav_on_done(void *ud, tb_err err) {
   tb_session_touch_net(&b->session);
   if (b->cfg.on_title) b->cfg.on_title(b, tb_view_title(b->view), b->cfg.ud);
   if (b->cfg.on_view_changed) b->cfg.on_view_changed(b, b->cfg.ud);
-out:
+done:
   free(c->url); free(c->final_url); free(c->content_type);
   free(c->body); free(c);
+}
+
+/* 排空就绪队列。返回提交的条数(供 tb_pump 判是否需要继续转)。 */
+static int nav_commit_ready(tb_browser *b) {
+  int n = 0;
+  while (b->nav_ready) {
+    nav_ctx *c = b->nav_ready;
+    b->nav_ready = c->next;
+    if (!b->nav_ready) b->nav_ready_tail = NULL;
+    c->next = NULL;
+    nav_commit_one(c);
+    n++;
+  }
+  return n;
 }
 
 /* replace=1 时不再压栈(back/forward/reload 已由 session 管理栈) */
@@ -192,8 +260,15 @@ static tb_err do_navigate(tb_browser *b, const char *url, const char *method,
   tb_session_touch_net(&b->session);
 
   nav_ctx *c = calloc(1, sizeof *c);
+  if (!c) { tb_err e = { TB_ERR_ARG, "out of memory" }; return e; }
   c->b = b;
   c->url = strdup(url);
+  /* 先挂上「在飞」链表:若 open 之后浏览器就被销毁(调用方没 pump 就
+     tb_destroy),on_done 永远不会触发,这份 nav_ctx(含整页 body)就成了
+     泄漏。ASAN 在 DestroyDuringNavigationFreesPendingCtx 里抓到过。
+     挂链必须早于 open —— open 可能同步派发回调。 */
+  c->next = b->nav_inflight;
+  b->nav_inflight = c;
 
   tb_transport_req req = {0};
   req.method = method;
@@ -621,6 +696,24 @@ void tb_destroy(tb_browser *b) {
     if (b->transport && b->transport->destroy) b->transport->destroy(b->transport);
     uv_loop_close(&b->loop);
   }
+  /* 回收所有 nav_ctx:在飞的和已就绪待提交的。
+   两者都是自己 malloc 的,传输层不负责回收(它只管自己的 op)。调用方可能
+   在导航途中直接 tb_destroy,那时 on_done 永远不会触发 —— 不排空就是泄漏,
+   且带着整页 body。ASAN 在 DestroyDuringNavigationFreesPendingCtx 里抓到过。 */
+  while (b->nav_ready) {
+    nav_ctx *c = b->nav_ready;
+    b->nav_ready = c->next;
+    free(c->url); free(c->final_url); free(c->content_type);
+    free(c->body); free(c);
+  }
+  b->nav_ready_tail = NULL;
+  while (b->nav_inflight) {
+    nav_ctx *c = b->nav_inflight;
+    b->nav_inflight = c->next;
+    free(c->url); free(c->final_url); free(c->content_type);
+    free(c->body); free(c);
+  }
+
   tb_session_free(&b->session);
   tb_view_free(b->view);
   free(b->cookie_jar);
@@ -633,8 +726,12 @@ int tb_pump(tb_browser *b, uint32_t timeout_ms) {
   const tb_clock *clk = b->cfg.clock;
   uint64_t deadline = timeout_ms ? clk->now_ms(clk) + timeout_ms : 0;
   for (;;) {
+    /* 顺序要紧:先让传输把完成事件派发进 nav_ready 队列(纯搬运),
+       再在顶层提交引擎工作。提交过程自身会 pump 传输抓子资源,
+       所以必须排在 transport->poll 之后、且不在任何回调栈内。 */
     if (b->loop_init) uv_run(&b->loop, UV_RUN_NOWAIT);
     b->transport->poll(b->transport);
+    nav_commit_ready(b);
     if (tb_session_idle(&b->session)) return 0;
     if (deadline && clk->now_ms(clk) >= deadline) return 1;
   }

@@ -12,6 +12,7 @@
 #include "view.h"
 #include "browser_internal.h"   /* b->engine / b->js_doc:重渲只能经 engine seam */
 #include "http_server.h"
+#include "guard_transport.h"     /* 结构性断言:引擎工作不在传输回调栈内 */
 #include <gtest/gtest.h>
 #include <stdlib.h>
 #include <string.h>
@@ -254,6 +255,71 @@ TEST(M2aIntegration, ExternalScriptSrc) {
   tb_view_free(v);
 
   tb_destroy(b);
+}
+
+/* reentrancy 回归:引擎工作不得发生在传输回调栈内。
+ *
+ * 曾经的 bug:nav_on_done 直接在传输回调里跑 load_document/render,而
+ * <script src> 的抓取(tb_load_sync)会同步调 transport->open/poll。对 curl
+ * 传输而言此刻正坐在 curl_multi_info_read 的循环里 —— 在 curl 自己的栈上
+ * 重入 curl_multi_add_handle,UB。
+ *
+ * 这里用 guard_transport 直接测量「回调执行期间有没有人再调 open/poll」。
+ * 断言写成两条,缺一不可:
+ *   reentrant_calls == 0   ← 真正的门禁
+ *   callback_count  >= 2   ← 保证这条路径真被走到了(否则 0 只是因为没触发)
+ * 少了后一条,测试在 bug 回归时会「因为没进那条路」而假绿。 */
+TEST(M2aIntegration, EngineWorkStaysOutsideTransportCallback) {
+  guard_transport gt;
+  gt.init();
+  gt.body =
+      "<!DOCTYPE html><title>Re</title><body><p>host</p>"
+      "<script src='/app.js'></script></body>";
+  gt.content_type = "text/html";
+
+  tb_config cfg;
+  memset(&cfg, 0, sizeof cfg);
+  cfg.user_agent = "tb-m2a-test";
+  cfg.idle_grace_ms = 0;
+  cfg.transport = &gt.base;      /* 注入观测用 transport */
+  tb_browser *b = tb_create(&cfg);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, "http://example.test/page").code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  EXPECT_EQ(gt.reentrant_calls, 0)
+      << "引擎工作在传输回调栈内做了同步网络往返 —— 这就是 UAF/reentrancy 的根";
+  EXPECT_GE(gt.callback_count, 2)
+      << "只派发了 " << gt.callback_count
+      << " 次回调;<script src> 的子资源请求没发出,本用例没测到想测的东西";
+
+  /* 顺带确认页面确实渲染出来了(否则「没重入」可能只是因为压根没加载)。 */
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_STREQ(tb_view_title(v), "Re");
+  tb_view_free(v);
+
+  tb_destroy(b);
+}
+
+/* 未及提交的导航在 tb_destroy 时必须被收走:nav_ctx 自己 malloc,还带着整页
+ * body。导航中直接销毁(不 wait_idle)是最容易漏的路径。 */
+TEST(M2aIntegration, DestroyDuringNavigationFreesPendingCtx) {
+  guard_transport gt;
+  gt.init();
+  /* open 立刻完成、poll 才派发,所以 tb_create 之后立刻 destroy,
+     on_done 还没跑过 —— 但 op 已 active,正是「在飞」的状态。 */
+  gt.body = "<title>Pending</title><p>x</p>";
+
+  tb_config cfg;
+  memset(&cfg, 0, sizeof cfg);
+  cfg.user_agent = "tb-m2a-test";
+  cfg.transport = &gt.base;
+  tb_browser *b = tb_create(&cfg);
+  ASSERT_NE(b, nullptr);
+  ASSERT_EQ(tb_navigate(b, "http://example.test/pending").code, 0);
+  tb_destroy(b);   /* 不得崩、不得漏 */
 }
 
 /* tb_load_sync 的所有权回归。
