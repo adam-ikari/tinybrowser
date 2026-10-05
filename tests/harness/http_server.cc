@@ -117,13 +117,22 @@ void HttpServer::run() {
       close(c);
       continue;
     }
+    // 回显请求的 Cookie 头当作正文。cookie 测试需要断言「浏览器实际发了什么」,
+    // 而不只是「jar 里有什么」—— 这两者之间的连线只有真发一次请求才验证得到。
+    if (path == "/echo-cookie") {
+      std::string ck;
+      header_value(req, "Cookie", ck);
+      respond(c, 200, "OK", "text/plain", ck, "");
+      close(c);
+      continue;
+    }
     auto it = routes_.find(path);
     if (it == routes_.end()) {
       respond(c, 404, "Not Found", "text/plain", "not found", "");
     } else {
       const Route &r = it->second;
       respond(c, r.status, r.status == 200 ? "OK" : "Status", r.content_type,
-              r.body, "");
+              r.body, r.extra_headers);
     }
     close(c);
   }

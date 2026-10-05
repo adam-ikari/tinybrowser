@@ -142,8 +142,13 @@ var document = {
     var all = document.querySelectorAll(sel);
     return all.length ? all[0] : null;
   },
-  get cookie() { return typeof __tb_cookie === "function" ? __tb_cookie() : ""; },
-  set cookie(v) { if (typeof __tb_cookie_set === "function") __tb_cookie_set(String(v)); }
+  /* cookie 走宿主 jar(见 cookie.h):读是 push 过来的 __tb_env.cookie(宿主在
+     导航提交后算好推给本页),写是往 mailbox 发一条指令。
+     此前这里是 `typeof __tb_cookie === 'function' ? ... : ''` —— 而该函数
+     **从未定义**,于是 document.cookie 恒为 ""、赋值静默失效,是个假实现。
+     HttpOnly 的 cookie 由宿主在计算时就排除,JS 侧看不见。 */
+  get cookie() { return __tb_env.cookie || ""; },
+  set cookie(v) { __tb_set_cookie(String(v)); }
 };
 
 // 交互辅助(供 C 侧 engine->eval):返回 JSON 字符串。

@@ -142,7 +142,11 @@ TEST(M2aIntegration, ConsoleBridgeRouted) {
 }
 
 /* setTimeout 由 qzjs polyfill 在库自有 loop 上触发,宿主 pump 之后回调应已生效。
- * 定时器改的是 DOM,所以要重新 render 才看得到 —— 这里显式重新 render 再断言。 */
+ *
+ * 视图刷新由宿主自动完成(见 nav_refresh_view),所以这里直接读 tb_observe 的
+ * 结果,不再手动过 engine seam 重渲 —— 那正是本用例当初要绕开的缺陷。
+ * 同样的行为在 BrowserApi.TimerMutationRefreshesView 里也有覆盖,那边还多
+ * 断言了「不刷新就永远看不到」的反面。 */
 TEST(M2aIntegration, TimerFiresThroughPump) {
   HttpServer srv({
       {"/", {200, "text/html",
@@ -160,25 +164,16 @@ TEST(M2aIntegration, TimerFiresThroughPump) {
   ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
   ASSERT_EQ(tb_wait_idle(b, 5000), 0);
 
-  tb_view *v = nullptr;
-  ASSERT_EQ(tb_observe(b, &v).code, 0);
-  EXPECT_EQ(strstr(tb_view_text(v), "ticked"), nullptr) << "定时器不该在导航期间同步触发";
-  tb_view_free(v);
-
-  /* 等定时器到期:轮询 render,直到视图出现 ticked 或超时。
-   * 宿主不持有 JSContext,「重新渲染」只能经 engine seam 走一趟控制面。 */
   bool ticked = false;
   for (int i = 0; i < 50 && !ticked; i++) {
     tb_pump(b, 20);
-    tb_view *v2 = tb_view_new();
-    ASSERT_EQ(b->engine->render(b->engine, b->js_doc, (srv.base() + "/").c_str(), 200, v2), 0);
-    ticked = strstr(tb_view_text(v2), "ticked") != nullptr;
-    tb_view_free(v2);
+    tb_view *v2 = nullptr;
+    if (tb_observe(b, &v2).code == 0) {
+      ticked = strstr(tb_view_text(v2), "ticked") != nullptr;
+      tb_view_free(v2);
+    }
   }
   EXPECT_TRUE(ticked) << "setTimeout 回调 1s 内未生效";
-
-  /* 宿主视图也应刷新到含 ticked —— tb_observe 拿的是缓存视图,交互后由
-   * engine 重渲,这里直接确认导航后的视图刷新路径已接通。 */
   tb_destroy(b);
 }
 
@@ -320,6 +315,278 @@ TEST(M2aIntegration, DestroyDuringNavigationFreesPendingCtx) {
   ASSERT_NE(b, nullptr);
   ASSERT_EQ(tb_navigate(b, "http://example.test/pending").code, 0);
   tb_destroy(b);   /* 不得崩、不得漏 */
+}
+
+/* ---- 浏览器 API:cookie / location / history / navigator ----
+ *
+ * 这一组验的是「补齐 API」那轮的产出。三条边界都必须测到:
+ *   - 读侧(宿主 push __tb_env):location.href 等纯本地读,无控制面往返
+ *   - 写侧(JS → mailbox → 宿主):location.href= / history.back()
+ *   - 真网络往返:cookie 不只是「jar 里有」,还要「真的发出去了」
+ */
+
+/* cookie 端到端:响应的 Set-Cookie 收进 jar,后续请求真的带上 Cookie 头。
+ * 用 /echo-cookie 回显服务端实际收到的 Cookie —— 只断言 jar 内容是不够的,
+ * jar 与请求头之间的连线只有真发一次请求才验证得到。 */
+TEST(BrowserApi, CookieRoundTripsOverRealRequests) {
+  HttpServer srv({
+      {"/set", {200, "text/html", "<title>Set</title><p>set page</p>",
+                "Set-Cookie: sid=abc123; Path=/\r\n"
+                "Set-Cookie: pref=dark; Path=/\r\n"}},
+      {"/echo-cookie", {200, "text/plain", ""}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  /* 第一次访问 /set:响应带两条 Set-Cookie */
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/set").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  /* 第二次访问 /echo:服务端的正文就是它收到的 Cookie 头 */
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/echo-cookie").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  std::string got = tb_view_text(v);
+  EXPECT_NE(got.find("sid=abc123"), std::string::npos) << "实际收到: " << got;
+  EXPECT_NE(got.find("pref=dark"), std::string::npos) << "实际收到: " << got;
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* document.cookie 之前是假实现:__tb_cookie 从未定义,读恒为 ""、写静默失效。
+ * 现在读侧由宿主 push、值要在页面脚本执行时就已就位。 */
+TEST(BrowserApi, DocumentCookieReadsServerCookiesInScript) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<!DOCTYPE html><title>C</title><body><p>x</p>"
+             "<script>document.title = 'saw:' + (document.cookie.indexOf('sid=xyz') >= 0);</script>"
+             "</body>",
+             "Set-Cookie: sid=xyz; Path=/\r\n"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  /* 关键是「true」:脚本执行那一刻 document.cookie 就得含 sid=xyz,
+     这要求宿主在 load_document 之前就把 env 推好(见 js_push_env 调用点)。 */
+  EXPECT_STREQ(tb_view_title(v), "saw:true");
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* HttpOnly:HTTP 上照发,但页面脚本读不到 document.cookie。 */
+TEST(BrowserApi, HttpOnlyCookieInvisibleToScript) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<!DOCTYPE html><title>H</title><body><p>x</p>"
+             "<script>document.title = 'leak:' + (document.cookie.indexOf('secret=1') >= 0);</script>"
+             "</body>",
+             "Set-Cookie: secret=1; HttpOnly; Path=/\r\n"
+             "Set-Cookie: plain=1; Path=/\r\n"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_STREQ(tb_view_title(v), "leak:false");
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* document.cookie 写侧:JS 赋值要真进 jar,并在后续请求发出。 */
+TEST(BrowserApi, DocumentCookieWriteReachesJar) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<!DOCTYPE html><title>W</title><body><p>x</p>"
+             "<script>document.cookie = 'fromjs=1; path=/';</script></body>"}},
+      {"/echo-cookie", {200, "text/plain", ""}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  /* 写入走 mailbox,须 pump 到宿主取出 —— 否则静默丢失。 */
+  for (int i = 0; i < 5; i++) tb_pump(b, 20);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/echo-cookie").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_NE(std::string(tb_view_text(v)).find("fromjs=1"), std::string::npos)
+      << "实际收到: " << tb_view_text(v);
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* location 的读侧:各派生属性必须与 href 自洽。全部在页面脚本里断言,
+ * 这样测的是「脚本看到的 location」,而不是宿主内部状态。
+ *
+ * 路由 key 不含 fragment:fragment 不会发给服务端,浏览器请求的是
+ * "/a/b?x=1&y=2"。而 location.hash 仍应从 effective URL 里读出 #frag ——
+ * 这正是要验的点(fragment 不上网但浏览器知道它)。 */
+TEST(BrowserApi, LocationPropertiesAreConsistent) {
+  HttpServer srv({
+      {"/a/b?x=1&y=2", {200, "text/html",
+             "<!DOCTYPE html><title>L</title><body><p>x</p>"
+             "<script>"
+             "var l = location;"
+             "document.title = [l.protocol, l.hostname, l.pathname,"
+             "                  l.search, l.hash].join('|');"
+             "</script></body>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/a/b?x=1&y=2#frag").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  std::string want = "http:|127.0.0.1|/a/b|?x=1&y=2|#frag";
+  EXPECT_STREQ(tb_view_title(v), want.c_str());
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* location 的写侧:脚本赋值 location.href 要真的导航过去。 */
+TEST(BrowserApi, LocationAssignmentNavigates) {
+  HttpServer srv({
+      {"/from", {200, "text/html",
+                 "<!DOCTYPE html><title>From</title><body><p>from</p>"
+                 "<script>location.href = '/to';</script></body>"}},
+      {"/to", {200, "text/html", "<title>To</title><p>arrived</p>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/from").c_str()).code, 0);
+  /* 导航由 mailbox 里的指令发起,pump 到它落地。 */
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+  for (int i = 0; i < 5; i++) tb_pump(b, 20);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_STREQ(tb_view_title(v), "To");
+  EXPECT_NE(strstr(tb_view_text(v), "arrived"), nullptr);
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* history.back()/forward() 要真的驱动 session 栈。 */
+TEST(BrowserApi, HistoryBackAndForward) {
+  HttpServer srv({
+      {"/one", {200, "text/html", "<title>One</title><p>one</p>"}},
+      {"/two", {200, "text/html", "<title>Two</title><p>two</p>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/one").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/two").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  /* 宿主层的历史栈:back 必须能回到第一页 */
+  ASSERT_EQ(tb_back(b).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_STREQ(tb_view_title(v), "One");
+  tb_view_free(v);
+
+  ASSERT_EQ(tb_forward(b).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_STREQ(tb_view_title(v), "Two");
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* navigator.userAgent:qzjs 自带 navigator,我们只补 userAgent/platform,
+ * 不能覆盖掉 qzjs 提供的其它属性。 */
+TEST(BrowserApi, NavigatorExposesUserAgent) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<!DOCTYPE html><title>N</title><body><p>x</p>"
+             "<script>document.title = navigator.userAgent;</script></body>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_STREQ(tb_view_title(v), "tb-m2a-test");   /* = make_browser 里设的 UA */
+  tb_view_free(v);
+
+  /* 不能把 qzjs 原有的 navigator 属性弄丢 */
+  char *out = nullptr;
+  ASSERT_EQ(tb_eval_js(b, "String(typeof navigator.platform)", &out).code, 0);
+  EXPECT_STREQ(out, "string");
+  free(out);
+  tb_destroy(b);
+}
+
+/* 定时器改 DOM 后宿主视图要自动刷新。
+ *
+ * 这是 M2a 遗留清单里的一项:qzjs 的定时器在它自有 loop 上跑,回调改了 DOM,
+ * 但宿主视图是导航时渲染的那一张,不会自己更新。真实页面大量依赖这个
+ * (轮询状态、动画、倒计时),不刷新等于定时器白写。
+ *
+ * 注意不要断言「定时器不能在导航期间触发」:qzjs 的 loop 与宿主并行,
+ * 导航过程本身有多趟控制面往返(推 env / begin / finish / render),
+ * 挂钟时间足够让短延时到期 —— 真实浏览器在主线程被阻塞时也一样。
+ * 要验的是「最终视图反映了定时器的改动」,这才是宿主该保证的事。 */
+TEST(BrowserApi, TimerMutationRefreshesView) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<!DOCTYPE html><title>Tick</title><body><p>start</p>"
+             "<script>setTimeout(function(){"
+             "  var p = document.createElement('p');"
+             "  p.textContent = 'ticked';"
+             "  document.body.appendChild(p);"
+             "}, 30);</script></body>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  /* pump 到定时器到期。不刷新视图的话这里永远看不到 ticked。 */
+  bool ticked = false;
+  for (int i = 0; i < 60 && !ticked; i++) {
+    tb_pump(b, 20);
+    tb_view *v2 = nullptr;
+    if (tb_observe(b, &v2).code == 0) {
+      ticked = strstr(tb_view_text(v2), "ticked") != nullptr;
+      tb_view_free(v2);
+    }
+  }
+  EXPECT_TRUE(ticked) << "定时器改了 DOM,但 tb_observe 拿到的视图没刷新";
+  tb_destroy(b);
 }
 
 /* tb_load_sync 的所有权回归。

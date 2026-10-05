@@ -33,11 +33,16 @@ typedef struct tb_transport_req {
   const char *url;
   const char *body;         /* POST body,NULL 表示空 */
   const char *content_type; /* 请求 Content-Type(表单 urlencoded 等),可 NULL */
+  const char *cookie;       /* 请求 Cookie 头值,NULL 表示不带 */
   /* 响应回调:全部在宿主线程、poll 期间同步触发。
      本设计约定:on_headers/on_body/on_done 在同一瞬间(传输完成时)依次触发,
      M1 实现统一在完成点派发。 */
   void (*on_headers)(void *ud, int status, const char *content_type,
                      int attachment, const char *final_url);
+  /* 逐条 Set-Cookie 原值(未解析、未拼接)。可以为 NULL —— 传输层不实现
+     cookie 时忽略即可,tinybrowser 自己就是可选地支持。
+     一个响应可能有多条,故是逐条回调而不是数组参数。 */
+  void (*on_set_cookie)(void *ud, const char *set_cookie_value);
   void (*on_body)(void *ud, const char *data, size_t len);
   void (*on_done)(void *ud, tb_err err);
   void *ud;

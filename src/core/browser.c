@@ -4,6 +4,7 @@
 #include "curl_transport.h"
 #include "session.h"
 #include "url.h"
+#include "cookie.h"
 #include "view.h"
 #include <uv.h>
 #include <stdio.h>
@@ -134,6 +135,7 @@ typedef struct nav_ctx {
   char *content_type;
   int attachment;
   char *body; size_t body_len, body_cap;
+  char *cookie_header;   /* 请求时发出的 Cookie 头;传输层持有其指针,故归本 ctx */
   int done;
   tb_err err;           /* on_done 带来的传输层结果 */
 } nav_ctx;
@@ -147,6 +149,14 @@ static void nav_on_headers(void *ud, int status, const char *ct,
   c->attachment = attachment;
   free(c->final_url);
   c->final_url = final_url ? strdup(final_url) : NULL;
+}
+
+/* Set-Cookie 落在 on_headers 之后派发(传输层的约定),此时 final_url 已就绪,
+   cookie 的 domain/path 归属可以按最终 URL 判定。 */
+static void nav_on_set_cookie(void *ud, const char *value) {
+  nav_ctx *c = ud;
+  const char *effective = c->final_url ? c->final_url : c->url;
+  tb_cookie_jar_set(c->b->cookies, value, effective);
 }
 
 static void nav_on_body(void *ud, const char *data, size_t len) {
@@ -231,11 +241,83 @@ static void nav_commit_one(nav_ctx *c) {
   }
   tb_session_nav_done(&b->session, effective, tb_view_title(b->view), c->status);
   tb_session_touch_net(&b->session);
+  /* pending_url 必须是本结构自有的副本 —— effective 指向 c->url/c->final_url,
+     而 nav_ctx 在本函数末尾就 free 了。定时器重渲要长期读它。 */
+  free((void *)b->pending_url);
+  b->pending_url = strdup(effective);
+  /* 指纹置 NULL = 「待重新采样」。下次 pump 会只记基线而不重渲,否则这次导航
+     会额外多触发一轮 on_view_changed/on_title(见 nav_refresh_view 首采分支)。 */
+  free(b->dom_fingerprint);
+  b->dom_fingerprint = NULL;
   if (b->cfg.on_title) b->cfg.on_title(b, tb_view_title(b->view), b->cfg.ud);
   if (b->cfg.on_view_changed) b->cfg.on_view_changed(b, b->cfg.ud);
 done:
   free(c->url); free(c->final_url); free(c->content_type);
-  free(c->body); free(c);
+  free(c->body); free(c->cookie_header); free(c);
+}
+
+/* ---- 定时器改动后的视图刷新 ----
+ *
+ * qzjs 的定时器在它自有 loop 上跑,回调改的是 JS 那棵树;宿主视图是导航时
+ * 渲染的那张,不会自己变。真实页面大量依赖这点(轮询状态、动画、倒计时),
+ * 不刷新等于定时器白写。
+ *
+ * 做法是**变更检测 + 惰性重渲**:让 JS 侧算一个 DOM 指纹(文本长度 + 节点
+ * 数 + title),宿主每次 pump 比一次,变了才重新 render。
+ *
+ * 为什么不在定时器回调里直接重渲:qzjs 从不回调宿主,回调跑在它的线程上,
+ * 没有办法在那里驱动宿主。只能在 pump 侧轮询。
+ *
+ * 为什么用指纹而不是「总是重渲」:重渲要过一趟控制面(JS_Eval + JSON 往返),
+ * 每次 pump 都做会给空闲页面带来无谓开销。指纹很便宜(一次小 eval),
+ * 且只在真变了时才付重渲的钱。
+ */
+static void nav_refresh_view(tb_browser *b) {
+  if (!b->js_doc || !b->engine || !b->view) return;
+  if (!b->pending_url) return;              /* 还没加载过文档 */
+  /* 不可渲染内容(图片/二进制等)没有 DOM 可重渲。少了这一句,二进制响应
+     会在下一次 pump 被引擎重渲成一张空视图,丢掉 not_renderable 标记 ——
+     tb_view_not_renderable() 随之失效。 */
+  if (b->view->is_not_renderable) return;
+
+  char *fp = NULL;
+  /* 指纹取文本长度 + 元素数 + title:足以覆盖绝大多数 DOM 变化,
+     又不至于长到把每次 pump 拖慢。 */
+  static const char FP_EXPR[] =
+      "String(__tb_doc ? (function(){ var n = 0, t = 0, st = [__tb_doc];"
+      " while (st.length) { var x = st.pop();"
+      "   if (x.type === 'text') t += x.text.length; else n++;"
+      "   for (var i = x.children.length - 1; i >= 0; i--) st.push(x.children[i]); }"
+      " return n + ':' + t + ':' + document.title; })() : '')";
+  if (b->engine->eval(b->engine, b->js_doc, FP_EXPR, &fp) != 0 || !fp) {
+    free(fp);
+    return;
+  }
+  if (!b->dom_fingerprint) {
+    /* 首次采样(刚导航完):只记基线,不重渲。
+       若在这里也重渲,每次导航都会多触发一次 on_view_changed/on_title ——
+       导航本身已经渲染过一次了。 */
+    b->dom_fingerprint = fp;
+    return;
+  }
+  if (strcmp(b->dom_fingerprint, fp) == 0) {
+    free(fp);                              /* 没变,省掉重渲 */
+    return;
+  }
+  free(b->dom_fingerprint);
+  b->dom_fingerprint = fp;                 /* fp 归本字段 */
+
+  tb_view *nv = tb_view_new();
+  if (!nv) return;
+  if (b->engine->render(b->engine, b->js_doc, b->pending_url,
+                        b->view->status, nv) == 0) {
+    tb_view_free(b->view);
+    b->view = nv;
+    if (b->cfg.on_title) b->cfg.on_title(b, tb_view_title(b->view), b->cfg.ud);
+    if (b->cfg.on_view_changed) b->cfg.on_view_changed(b, b->cfg.ud);
+  } else {
+    tb_view_free(nv);                      /* 渲染失败:保留旧视图 */
+  }
 }
 
 /* 排空就绪队列。返回提交的条数(供 tb_pump 判是否需要继续转)。 */
@@ -280,7 +362,13 @@ static tb_err do_navigate(tb_browser *b, const char *url, const char *method,
   req.on_headers = nav_on_headers;
   req.on_body = nav_on_body;
   req.on_done = nav_on_done;
+  req.on_set_cookie = nav_on_set_cookie;
   req.ud = c;
+  /* Cookie 头:按请求 URL 从 jar 里取(域/路径/Secure/HttpOnly 过滤在 jar 内做)。
+     请求 URL 存在 nav_ctx 里,传输层在 op 存活期间持有该指针 —— 与
+     req.url 借用同一份,无额外生命周期问题。 */
+  c->cookie_header = tb_cookie_jar_header(b->cookies, url);
+  req.cookie = c->cookie_header;
   b->transport->open(b->transport, &req);
   tb_err ok = { 0, "" };
   return ok;
@@ -680,6 +768,17 @@ tb_browser *tb_create(const tb_config *cfg) {
     return NULL;
   }
   tb_session_init(&b->session, b->cfg.clock, b->cfg.idle_grace_ms);
+  b->cookies = tb_cookie_jar_new();
+  if (!b->cookies) {
+    if (b->js_doc && b->engine) b->engine->close(b->engine, b->js_doc);
+    if (b->loop_init) {
+      if (b->transport && b->transport->destroy) b->transport->destroy(b->transport);
+      uv_loop_close(&b->loop);
+    }
+    tb_session_free(&b->session);
+    free(b);
+    return NULL;
+  }
   return b;
 }
 
@@ -704,19 +803,21 @@ void tb_destroy(tb_browser *b) {
     nav_ctx *c = b->nav_ready;
     b->nav_ready = c->next;
     free(c->url); free(c->final_url); free(c->content_type);
-    free(c->body); free(c);
+    free(c->body); free(c->cookie_header); free(c);
   }
   b->nav_ready_tail = NULL;
   while (b->nav_inflight) {
     nav_ctx *c = b->nav_inflight;
     b->nav_inflight = c->next;
     free(c->url); free(c->final_url); free(c->content_type);
-    free(c->body); free(c);
+    free(c->body); free(c->cookie_header); free(c);
   }
 
   tb_session_free(&b->session);
   tb_view_free(b->view);
-  free(b->cookie_jar);
+  tb_cookie_jar_free(b->cookies);
+  free((void *)b->pending_url);
+  free(b->dom_fingerprint);
   free(b);
 }
 
@@ -726,12 +827,22 @@ int tb_pump(tb_browser *b, uint32_t timeout_ms) {
   const tb_clock *clk = b->cfg.clock;
   uint64_t deadline = timeout_ms ? clk->now_ms(clk) + timeout_ms : 0;
   for (;;) {
-    /* 顺序要紧:先让传输把完成事件派发进 nav_ready 队列(纯搬运),
-       再在顶层提交引擎工作。提交过程自身会 pump 传输抓子资源,
-       所以必须排在 transport->poll 之后、且不在任何回调栈内。 */
+    /* 顺序要紧,四步依次:
+       1. 推进 uv loop + 传输 —— 完成的导航进 nav_ready 队列(纯搬运)。
+       2. 排空 JS 邮箱 —— console 帧与「导航指令」在此取出。**这一步原先
+          根本不存在**:poll_timers 从没被调用过,而 qzjs 只在控制面往返时
+          才顺带取邮箱。于是页面脚本里的 location.href='/x' 发出的指令永远
+          没人执行,console 帧也会一直堆着。qzjs 从不回调宿主,邮箱是它唯一
+          的出站通道,不排它等于把 JS 的对外输出全堵死。
+       3. 在顶层提交引擎工作。提交过程自身会 pump 传输抓子资源,所以必须
+          排在 transport->poll 之后、且不在任何回调栈内。
+       4. 判空闲。 */
     if (b->loop_init) uv_run(&b->loop, UV_RUN_NOWAIT);
     b->transport->poll(b->transport);
+    if (b->js_doc && b->engine && b->engine->poll_timers)
+      b->engine->poll_timers(b->engine, b->js_doc);
     nav_commit_ready(b);
+    nav_refresh_view(b);
     if (tb_session_idle(&b->session)) return 0;
     if (deadline && clk->now_ms(clk) >= deadline) return 1;
   }

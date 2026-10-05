@@ -107,6 +107,12 @@ target_include_directories(test_js_engine PRIVATE ${TB_TEST_INCS})
 target_link_libraries(test_js_engine PRIVATE tinybrowser qzjs gtest_main)
 gtest_discover_tests(test_js_engine)
 
+# Cookie jar:纯 C 逻辑测试(域/路径匹配、过期、HttpOnly/Secure)。
+add_executable(test_cookie unit/test_cookie.cc)
+target_include_directories(test_cookie PRIVATE ${TB_TEST_INCS})
+target_link_libraries(test_cookie PRIVATE tinybrowser gtest_main)
+gtest_discover_tests(test_cookie)
+
 # M2a 端到端集成:真 HTTP server + 真 qzjs + 真 curl,走完整导航路径。
 add_executable(test_m2a_integration integration/test_m2a_integration.cc harness/http_server.cc)
 target_include_directories(test_m2a_integration PRIVATE ${TB_TEST_INCS})

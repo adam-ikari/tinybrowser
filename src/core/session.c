@@ -80,3 +80,5 @@ const char *tb_session_title(const tb_session *s) { return s->cur_title; }
 int tb_session_status(const tb_session *s) { return s->cur_status; }
 int tb_session_can_back(const tb_session *s) { return s->nback > 0; }
 int tb_session_can_fwd(const tb_session *s) { return s->nfwd > 0; }
+int tb_session_nback(const tb_session *s) { return s->nback; }
+int tb_session_nfwd(const tb_session *s) { return s->nfwd; }

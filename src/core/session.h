@@ -35,6 +35,9 @@ const char *tb_session_title(const tb_session *s);
 int tb_session_status(const tb_session *s);
 int tb_session_can_back(const tb_session *s);
 int tb_session_can_fwd(const tb_session *s);
+/* 栈深度(供 history.length 用;两者相加即浏览器语义下的历史长度) */
+int tb_session_nback(const tb_session *s);
+int tb_session_nfwd(const tb_session *s);
 
 #ifdef __cplusplus
 }

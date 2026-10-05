@@ -121,6 +121,44 @@ static void js_drain_one(js_handle *h, char *json) {
         h->host->cfg.on_console) {
       h->host->cfg.on_console(h->host, lv->valuestring, mg->valuestring,
                               h->host->cfg.ud);
+    } else {
+      /* document.cookie 写入:JS 发原值 + 当前页 URL,宿主按 URL 判定
+         domain/path 缺省值。HttpOnly 覆盖不了 —— JS 压根看不到那些。 */
+      const cJSON *ck = cJSON_GetObjectItemCaseSensitive(root, "__tb_cookie_set");
+      if (cJSON_IsObject(ck) && h->host) {
+        const cJSON *v = cJSON_GetObjectItemCaseSensitive(ck, "value");
+        const cJSON *u = cJSON_GetObjectItemCaseSensitive(ck, "url");
+        if (cJSON_IsString(v) && v->valuestring && cJSON_IsString(u) && u->valuestring)
+          tb_cookie_jar_set(h->host->cookies, v->valuestring, u->valuestring);
+      } else {
+        /* 导航指令:JS 侧 location.href=/assign()/history.back() 发过来的。
+         * 走同一条 mailbox —— 与 console 同源,qzjs 从不回调宿主。 */
+        const cJSON *nv = cJSON_GetObjectItemCaseSensitive(root, "__tb_nav");
+        if (cJSON_IsObject(nv) && h->host) {
+          const cJSON *act = cJSON_GetObjectItemCaseSensitive(nv, "action");
+          const cJSON *url = cJSON_GetObjectItemCaseSensitive(nv, "url");
+          const char *a = cJSON_IsString(act) ? act->valuestring : "navigate";
+          if (strcmp(a, "reload") == 0) {
+            tb_reload(h->host);
+          } else if (strcmp(a, "back") == 0) {
+            tb_back(h->host);
+          } else if (strcmp(a, "forward") == 0) {
+            tb_forward(h->host);
+          } else if (cJSON_IsString(url) && url->valuestring && url->valuestring[0]) {
+            /* 相对引用按当前文档 URL 解析(浏览器语义):
+               location.href='/next' 是最常见的写法,直接丢给 curl 会因缺 host
+               而失败。session 的 cur_url 此刻就是当前页。 */
+            const char *base = tb_session_url(&h->host->session);
+            char *abs = tb_url_resolve(base, url->valuestring);
+            if (abs) {
+              tb_navigate(h->host, abs);
+              free(abs);
+            } else {
+              tb_navigate(h->host, url->valuestring);
+            }
+          }
+        }
+      }
     }
     cJSON_Delete(root);
   }
@@ -287,6 +325,74 @@ static const char *TB_BOOT_SRC =
   "  };"
   "});"
   "try { globalThis.console = __tb_console; } catch (e) {}"
+  /* location / history / navigator。
+     qzjs 从不执行宿主代码,所以这里没有「宿主函数」可用。分成两个方向:
+     - **读**(url / 历史长度 / UA):宿主在每次导航提交后用 eval 把最新值推给
+       __tb_env,JS 侧只读本地对象。查询不往返控制面,故 location.href 随手可读。
+     - **写**(location.href = x / assign / reload / back / forward):JS 往
+       mailbox postMessage,宿主在 poll_timers 里取出并执行。这是唯一可行方向,
+       因为写操作天然是异步的 —— 导航要等网络。 */
+  "var __tb_env = { url: '', hlen: 0, can_back: false, can_fwd: false, ua: '',"
+                       " cookie: '' };"
+  /* document.cookie 的写侧。读侧在 __tb_env.cookie(宿主推的,已排除 HttpOnly)。
+     setcookie 的第一个参数是当前页 URL —— 宿主据此判定 domain/path 缺省值。 */
+  "var __tb_set_cookie = function (v) {"
+  "  try { postMessage({ __tb_cookie_set: { value: v, url: __tb_env.url } }); } catch (e) {}"
+  "};"
+  "var __tb_send_nav = function (action, url) {"
+  "  try { postMessage({ __tb_nav: { action: action, url: url || '' } }); } catch (e) {}"
+  "};"
+  "var __tb_location = {"
+  "  get href() { return __tb_env.url; },"
+  "  set href(v) { __tb_send_nav('navigate', String(v)); },"
+  "  get origin() { var m = this.href.match(/^[a-z]+:\\/\\/[^\\/]+/); return m ? m[0] : ''; },"
+  "  get protocol() { return this.href.split(':')[0] + ':'; },"
+  "  get host() { var m = this.href.match(/^[a-z]+:\\/\\/([^\\/?#]+)/); return m ? m[1] : ''; },"
+  "  get hostname() { var h = this.host.split(':'); return h[0]; },"
+  "  get port() { var h = this.host.split(':'); return h.length > 1 ? h[1] : ''; },"
+  "  get pathname() {"
+  "    var s = this.href.replace(/^[a-z]+:\\/\\/[^\\/?#]+/, '');"
+  "    var q = s.indexOf('?'); if (q >= 0) s = s.slice(0, q);"
+  "    var f = s.indexOf('#'); if (f >= 0) s = s.slice(0, f);"
+  "    return s || '/';"
+  "  },"
+  "  get search() {"
+  "    var s = this.href; var q = s.indexOf('?');"
+  "    if (q < 0) return '';"
+  "    var f = s.indexOf('#');"
+  "    return f > q ? s.slice(q, f) : s.slice(q);"
+  "  },"
+  "  get hash() { var f = this.href.indexOf('#'); return f < 0 ? '' : this.href.slice(f); },"
+  "  reload: function () { __tb_send_nav('reload', ''); },"
+  "  assign: function (u) { __tb_send_nav('navigate', String(u)); },"
+  "  replace: function (u) { __tb_send_nav('navigate', String(u)); },"
+  "  toString: function () { return this.href; }"
+  "};"
+  "var __tb_history = {"
+  "  get length() { return __tb_env.hlen; },"
+  "  back: function () { __tb_send_nav('back', ''); },"
+  "  forward: function () { __tb_send_nav('forward', ''); },"
+  "  go: function (n) {"
+  "    n = Number(n) | 0;"
+  "    if (n < 0) { for (var i = 0; i < -n; i++) this.back(); }"
+  "    else if (n > 0) { for (var i = 0; i < n; i++) this.forward(); }"
+  "  },"
+  "  get state() { return null; }"
+  "};"
+  /* navigator:qzjs 的 polyfill 已经建了一个 navigator,并且把 userAgent 设成
+     'qzjs/1.0 (WinterTC)'。那在独立运行时是对的(标识运行时),但页面是跑在
+     **浏览器**里的 —— 必须覆盖成浏览器 UA,否则服务端的 UA 嗅探会把它判成
+     非浏览器(qzjs 那套 WinterTC 的 UA 嗅探恰好「像」浏览器,后果更隐蔽)。
+     故此处**无条件覆盖** userAgent,但不整体替换 navigator 对象,保留 qzjs
+     提供的其余属性。 */
+  "try {"
+  "  var __tb_nav = globalThis.navigator;"
+  "  if (!__tb_nav) { __tb_nav = {}; globalThis.navigator = __tb_nav; }"
+  "  try { __tb_nav.userAgent = __tb_env.ua || __tb_nav.userAgent || ''; } catch (e) {}"
+  "  try { if (!__tb_nav.platform) __tb_nav.platform = 'Linux x86_64'; } catch (e) {}"
+  "} catch (e) {}"
+  "try { globalThis.location = __tb_location; } catch (e) {}"
+  "try { globalThis.history = __tb_history; } catch (e) {}"
   /* window = globalThis 的别名。qzjs 提供了 self(=== globalThis)但没有 window,
      而 window.x = v / window.location 是网页脚本最常见的写法 —— 缺了它,
      一大批真实页面在第一行就 ReferenceError。别名指向同一对象,不是拷贝。 */
@@ -328,10 +434,6 @@ static const char *TB_BOOT_SRC =
   "  __tb_doc = __tb_root;"
   "  return true;"
   "};";
-
-/* ===================================================================
- * engine impl
- * =================================================================== */
 
 static void *js_engine_open(const struct tb_js_engine *self, tb_browser *host) {
   (void)self;
@@ -390,12 +492,84 @@ static void js_engine_close(const struct tb_js_engine *self, void *handle) {
   free(h);
 }
 
+/* ---- 把宿主的浏览器环境推给 JS(location/history/navigator 的读侧) ----
+ *
+ * qzjs 从不回调宿主,所以读侧不能「问宿主」。做法是宿主主动推:把最新 URL /
+ * 历史长度 / UA 用 op:"eval" 写进 __tb_env,JS 侧只读本地变量。读
+ * (location.href)因此没有控制面往返开销 —— 真实页面脚本动辄读几十次。
+ */
+/* 表达式模板单独提出来,长度用 strlen(FMT) 算 —— 不再用「+160」这种魔数。
+ * 那个魔数曾经不够:格式串本身已超 160 字节,snprintf 静默截断出一条残缺表达式,
+ * eval 报错,而返回值当时被忽略,于是表现为「location 全是空值」这种
+ * 完全指不到根因的现象。与本文件早前 `js_eval(..., 24, ...)` 少一个字符
+ * 是同一类错误,同一个坑踩了两次。 */
+#define TB_PUSH_ENV_FMT \
+  "__tb_env.url = %s; __tb_env.ua = %s;" \
+  "__tb_env.hlen = %d; __tb_env.can_back = %d; __tb_env.can_fwd = %d;" \
+  /* qzjs polyfill 把 userAgent 设成 'qzjs/1.0 (WinterTC)'。页面跑在浏览器里, */ \
+  /* 必须覆盖成浏览器 UA,否则服务端的 UA 嗅探会误判。boot 期 __tb_env.ua 还是 */ \
+  /* 空的,所以每次 push 都重设一遍。 */ \
+  "try { if (globalThis.navigator) navigator.userAgent = __tb_env.ua; } catch (e) {}" \
+  "1"
+
+static int js_push_env(js_handle *h, const char *url) {
+  tb_browser *b = h->host;
+  if (!b || !h->rt || !url) return 0;
+  char *ju = json_string(url, strlen(url));
+  const char *ua = b->cfg.user_agent ? b->cfg.user_agent : "";
+  char *jua = json_string(ua, strlen(ua));
+  if (!ju || !jua) { free(ju); free(jua); return -1; }
+
+  /* history.length 含后退栈 + 前进栈(浏览器行为亦然),故两个栈长度相加。 */
+  int hlen = tb_session_nback(&b->session) + tb_session_nfwd(&b->session);
+  /* +1 收尾 NUL,+32 给三个 %d 的最坏位数留余量。 */
+  size_t need = strlen(ju) + strlen(jua) + strlen(TB_PUSH_ENV_FMT) + 32 + 1;
+  char *expr = (char *)malloc(need);
+  if (!expr) { free(ju); free(jua); return -1; }
+  snprintf(expr, need, TB_PUSH_ENV_FMT,
+           ju, jua, hlen, tb_session_can_back(&b->session),
+           tb_session_can_fwd(&b->session));
+  free(ju); free(jua);
+
+  /* document.cookie 的读侧也在这里推。此刻 jar 里可能已含**上一页**设的
+     cookie —— 正确:cookie 在文档解析前就该可见(与真实浏览器一致)。 */
+  char *jc = tb_cookie_jar_visible(b->cookies, url);
+  if (jc) {
+    char *jcs = json_string(jc, strlen(jc));
+    free(jc);
+    if (jcs) {
+      /* 按 jcs(转义后)的长度算,不是 jc —— cookie 值里可能有引号/反斜杠,
+         转义后更长,拿原长度算会再次截断。 */
+      size_t n2 = strlen(expr) + strlen(jcs) + strlen("; __tb_env.cookie = ") + 1;
+      char *expr2 = (char *)malloc(n2);
+      if (expr2) {
+        snprintf(expr2, n2, "%s; __tb_env.cookie = %s", expr, jcs);
+        free(expr);
+        expr = expr2;
+      }
+      free(jcs);
+    }
+  }
+
+  char *out = NULL;
+  int rc = js_eval(h, expr, strlen(expr), &out);
+  if (rc != 0)
+    fprintf(stderr, "[js_engine] push env failed: %s\n", out ? out : "?");
+  free(expr);
+  free(out);
+  return rc;
+}
+
 /* 两段式:begin → 宿主抓 src → finish */
 static int js_engine_load_document(const struct tb_js_engine *self, void *handle,
                                    const char *body, size_t len, const char *base_url) {
   (void)self;
   js_handle *h = (js_handle *)handle;
   if (!h || !h->rt) return -1;
+
+  /* 环境必须先于文档推给 JS:脚本执行时 location 得已是本页 URL,否则读到的是
+     上一页(session 的 cur_url 此刻尚未 nav_done)。 */
+  if (h->host) js_push_env(h, base_url);
 
   /* 阶段一:__tb_begin_load(body) → src 列表(JSON 字符串) */
   char *jbody = json_string(body ? body : "", len);
