@@ -14,6 +14,7 @@ typedef struct tb_curl_op {
   char *ct;
   int attachment;
   char *final_url;
+  char *cookies;      /* 全部 Set-Cookie 原值,\n 分隔 */
   char errbuf[CURL_ERROR_SIZE];
 } tb_curl_op;
 
@@ -122,6 +123,35 @@ static size_t header_cb(char *buf, size_t sz, size_t n, void *ud) {
     memcpy(op->ct, v, vlen); op->ct[vlen] = '\0';
   } else if (nl == 20 && strncasecmp(line, "content-disposition", 20) == 0) {
     if (header_has_token(v, vlen, "attachment")) op->attachment = 1;
+  } else if (nl == 10 && strncasecmp(line, "set-cookie", 10) == 0 &&
+             op->req.on_set_cookie) {
+    /* Set-Cookie 逐条派发。不能在 header_cb 里直接调宿主回调 —— 那是 curl
+       内部栈,且 host 名 (cookie 的 domain/path 归属)要等 final_url 才知道。
+       故先攒着,到完成点、拿到 final_url 之后再派发(见 check_multi_info)。 */
+    char *val = (char *)malloc(vlen + 1);
+    if (val) {
+      memcpy(val, v, vlen);
+      val[vlen] = '\0';
+      /* 追加:多条 Set-Cookie 用 \n 分隔。
+       * val 在两个分支里都必须被消费或释放 —— 早先只在「首个 cookie」分支
+       * 把它挂到 op->cookies,追加分支拷完就丢弃,于是第二条及以后的
+       * Set-Cookie 每次漏一份(ASAN 实测 18 bytes,CookieRoundTrips 发两条
+       * cookie 时抓到)。realloc 失败时同样要释放,否则静默漏。 */
+      if (op->cookies) {
+        size_t old = strlen(op->cookies);
+        char *bigger = (char *)realloc(op->cookies, old + vlen + 2);
+        if (bigger) {
+          bigger[old] = '\n';
+          memcpy(bigger + old + 1, val, vlen + 1);
+          op->cookies = bigger;
+          free(val);
+        } else {
+          free(val);   /* 保留已攒的 cookies,丢弃这一条 */
+        }
+      } else {
+        op->cookies = val;
+      }
+    }
   }
   return len;
 }
@@ -160,6 +190,26 @@ static void check_multi_info(tb_curl_transport *t) {
     curl_easy_cleanup(easy);
     /* 派发(完成点统一触发,见 tb.h 约定) */
     op->req.on_headers(op->req.ud, op->status, op->ct, op->attachment, op->final_url);
+    /* Set-Cookie 在 on_headers 之后派发:cookie 的 domain/path 归属要靠
+       final_url 判定,宿主必须先看到 final_url。 */
+    if (op->cookies && op->req.on_set_cookie) {
+      const char *p = op->cookies;
+      while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        if (n) {
+          char *one = (char *)malloc(n + 1);
+          if (one) {
+            memcpy(one, p, n);
+            one[n] = '\0';
+            op->req.on_set_cookie(op->req.ud, one);
+            free(one);
+          }
+        }
+        if (!nl) break;
+        p = nl + 1;
+      }
+    }
     if (op->blen) op->req.on_body(op->req.ud, op->body, op->blen);
     tb_err e = { 0, "" };
     if (rc != CURLE_OK) {
@@ -167,7 +217,7 @@ static void check_multi_info(tb_curl_transport *t) {
       snprintf(e.msg, sizeof e.msg, "%s", op->errbuf[0] ? op->errbuf : curl_easy_strerror(rc));
     }
     op->req.on_done(op->req.ud, e);
-    free(op->body); free(op->ct); free(op->final_url); free(op);
+    free(op->body); free(op->ct); free(op->final_url); free(op->cookies); free(op);
   }
 }
 
@@ -189,6 +239,10 @@ static void *curl_open(const tb_transport *self, const tb_transport_req *req) {
   curl_easy_setopt(op->easy, CURLOPT_WRITEDATA, op);
   curl_easy_setopt(op->easy, CURLOPT_ERRORBUFFER, op->errbuf);
   curl_easy_setopt(op->easy, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+  /* Cookie 头:browser 侧拼好传进来。CURLOPT_COOKIE(而非 COOKIEFILE)——
+     我们自己的 jar 在内存里,不走 curl 的 cookie engine(那需要落盘/回调)。 */
+  if (req->cookie && req->cookie[0])
+    curl_easy_setopt(op->easy, CURLOPT_COOKIE, req->cookie);
   if (t->ca_bundle) curl_easy_setopt(op->easy, CURLOPT_CAINFO, t->ca_bundle);
   if (strcmp(req->method, "POST") == 0) {
     /* COPYPOSTFIELDS 自行拷贝,避免依赖 req->body 生命周期 */
@@ -205,7 +259,7 @@ static void curl_cancel(const tb_transport *self, void *opv) {
   if (op) {
     curl_multi_remove_handle(t->multi, op->easy);
     curl_easy_cleanup(op->easy);
-    free(op->body); free(op->ct); free(op->final_url); free(op);
+    free(op->body); free(op->ct); free(op->final_url); free(op->cookies); free(op);
   }
 }
 
