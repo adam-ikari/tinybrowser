@@ -130,6 +130,12 @@ static void js_drain_one(js_handle *h, char *json) {
  * 控制面往返:发命令 → 阻塞等回执(途中把 console 消息派发掉)
  * =================================================================== */
 
+/* interrupt 命令(op:"interrupt" 是 fire-and-forget,无 correl 也照收,故不需要
+ * 登记回执条目)。长度一律用 strlen —— 之前硬编码成 20,而字面量只有 18 字节,
+ * qz_control_sink 里的 memcpy 会多读 2 字节越过字符串字面量(ASAN:
+ * global-buffer-overflow)。长度算错不改变功能,但确实是越界读,别再写死。 */
+static const char TB_INTERRUPT_CMD[] = "{\"op\":\"interrupt\"}";
+
 /* 成功返回 malloc'd 回执 JSON(调用者 free);失败返回 NULL。
  * 非回执的邮箱消息(console)就地消费后继续等。 */
 static char *js_ctl(js_handle *h, const char *cmd, int timeout_ms) {
@@ -142,7 +148,7 @@ static char *js_ctl(js_handle *h, const char *cmd, int timeout_ms) {
     if (timeout_ms >= 0 && slice <= 0) {
       /* 收据窗口用尽:投递 interrupt(无 correl 的 fire-and-forget 形态),
        * 让引擎在下一个指令边界停下,并等它把异常回执吐出来。 */
-      qz_control(h->rt, "{\"op\":\"interrupt\"}", 20);
+      qz_control(h->rt, TB_INTERRUPT_CMD, strlen(TB_INTERRUPT_CMD));
       return NULL;
     }
     char *json = NULL;
@@ -152,7 +158,7 @@ static char *js_ctl(js_handle *h, const char *cmd, int timeout_ms) {
     int r = qz_recv_message(h->rt, &json, &len, t);
     if (r == 1) {  /* 超时 */
       if (timeout_ms < 0) continue;
-      qz_control(h->rt, "{\"op\":\"interrupt\"}", 20);
+      qz_control(h->rt, TB_INTERRUPT_CMD, strlen(TB_INTERRUPT_CMD));
       return NULL;
     }
     if (r < 0 || !json) return NULL;

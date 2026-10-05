@@ -66,7 +66,7 @@ static void add_elem(ctx_t *c, const char *type, tb_node *n) {
   memset(e, 0, sizeof *e);
   e->off = c->len;   /* 元素文本起点 = 当前已写缓冲长度(文本尚未 push) */
   e->id = tb_dom_id(c->dom, n);
-  e->type = type;
+  e->type = strdup(type);   /* tb_view_free 拥有 type(见 view.c 的所有权说明) */
   /* 交互标签 = 后代文本;select/form 是容器,textContent 为选项/子元素拼接,无意义 */
   if (strcmp(type, "select") == 0 || strcmp(type, "form") == 0) {
     e->text = strdup("");

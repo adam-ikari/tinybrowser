@@ -24,7 +24,12 @@ static char *ctl(qz_t *rt, const std::string &cmd, const char *correl) {
     const cJSON *co = root ? cJSON_GetObjectItemCaseSensitive(root, "correl") : nullptr;
     bool match = cJSON_IsString(co) && correl && co->valuestring &&
                  std::string(co->valuestring) == correl;
-    if (match) return json;  /* 归调用者 */
+    if (match) {
+      /* json 归调用者,但 root 是本次循环的临时解析树,必须在这里释放 ——
+       * 否则每次命中回执都漏一份 cJSON 树(ASAN: 83 allocations)。 */
+      cJSON_Delete(root);
+      return json;
+    }
     cJSON_Delete(root);
     qz_free_message(json);
   }
