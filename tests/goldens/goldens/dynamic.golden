@@ -1,0 +1,8 @@
+URL: http://example.test/dynamic
+TITLE: ByScript
+STATUS: 200
+TEXT:
+static
+injected
+---
+ELEMS:

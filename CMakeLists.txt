@@ -143,8 +143,7 @@ target_link_libraries(tinybrowser PUBLIC
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_js.cmake)
 set(TB_JS_BUILTINS ${CMAKE_CURRENT_BINARY_DIR}/src/core/js_builtins.inc)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/src/core)
-tb_embed_js(${CMAKE_CURRENT_SOURCE_DIR}/src/js ${TB_JS_BUILTINS})
-add_custom_target(tb_js_builtins ALL DEPENDS ${TB_JS_BUILTINS})
+tb_embed_js(${CMAKE_CURRENT_SOURCE_DIR}/src/js ${TB_JS_BUILTINS} tb_js_builtins)
 add_dependencies(tinybrowser tb_js_builtins)
 
 if(TB_BUILD_TESTS)

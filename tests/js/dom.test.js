@@ -40,6 +40,16 @@ t("title read/write", function () {
   eq(document.title, "Changed");
 });
 
+t("document.body / head convenience", function () {
+  var d = doc("<head></head><body><p>x</p></body>");
+  eq(document.body.tag, "body");
+  eq(document.head.tag, "head");
+  eq(document.body.childNodes[0].textContent, "x");
+  var d2 = doc("<p>no body</p>");
+  eq(document.body, null);
+  eq(document.head, null);
+});
+
 t("readyState ro", function () {
   var d = doc("<p>x</p>");
   eq(document.readyState, "complete");

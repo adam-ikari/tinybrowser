@@ -82,6 +82,10 @@ var document = {
     _tb_next_id = function () { return ++maxId; };
   },
   get documentElement() { return document._root; },
+  // 便捷引用:网页脚本第一件事就是 document.body.appendChild(...)。没有它的话
+  // 每个 fixture 都得写 querySelector("body"),噪音大且易错。
+  get body() { return document.querySelector("body"); },
+  get head() { return document.querySelector("head"); },
   get readyState() { return _tb_parser._readyState || "complete"; },
   get title() {
     // 迭代找 title 文本

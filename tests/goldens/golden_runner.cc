@@ -21,7 +21,7 @@ static char *render_html(const char *html, size_t hlen, const char *url) {
   if (!eng) return NULL;
   void *h = eng->open(eng, NULL);
   if (!h) return NULL;
-  if (eng->load_document(eng, h, html, hlen) != 0) {
+  if (eng->load_document(eng, h, html, hlen, url) != 0) {
     eng->close(eng, h);
     return NULL;
   }
@@ -45,7 +45,8 @@ int main(int argc, char **argv) {
     else prefix = argv[i];
   }
 
-  const char *fixtures[] = { "hello", "forms", "nav", "entities", "scriptpage" };
+  const char *fixtures[] = { "hello", "forms", "nav", "entities", "scriptpage",
+                             "dynamic" };
   int nfixtures = (int)(sizeof(fixtures) / sizeof(fixtures[0]));
   int failures = 0;
 
