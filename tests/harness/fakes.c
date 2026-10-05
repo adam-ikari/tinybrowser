@@ -82,6 +82,7 @@ void fake_transport_init(fake_transport *ft, fake_clock *fc) {
   ft->base.open = fake_open;
   ft->base.cancel = fake_cancel;
   ft->base.poll = fake_poll;
+  ft->base.destroy = NULL;   /* fake 不持有堆资源,tb_destroy 不会调它 */
   ft->clock = fc;
   ft->responses = NULL; ft->nresponses = 0;
   ft->ops = NULL;

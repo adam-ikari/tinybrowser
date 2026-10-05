@@ -211,11 +211,49 @@ static void curl_cancel(const tb_transport *self, void *opv) {
 
 static void curl_poll(const tb_transport *self) { (void)self; /* uv 驱动 */ }
 
+/* timer 的 close 回调:uv_close 是异步的,而 timer 句柄内嵌在 t 里,
+   所以 t 必须活到回调跑完。真正释放放在这里。 */
+static void on_timer_closed(uv_handle_t *h) {
+  tb_curl_transport *t = (tb_curl_transport *)h->data;
+  curl_multi_cleanup(t->multi);
+  free(t);
+}
+
+/* tb_destroy 调用(仅限 tb_create 自建的默认 transport)。
+ *
+ * curl_multi_init() 会建一个内部连接池 easy handle,此前没有任何地方调
+ * curl_multi_cleanup() —— 长跑进程、或反复 create/destroy 的测试会持续
+ * 累积(ASAN/Valgrind: 每次 tb_create 泄漏 multi + 连接池)。
+ *
+ * uv_timer_t 内嵌在 t 中,而 uv_close 异步,所以顺序是:
+ *   uv_timer_stop → curl_multi_cleanup(同步释放 curl 侧) → uv_close(摘链)
+ *   → uv_run(NOWAIT) 让 close 回调跑掉 → 回调里 free(t)。
+ * 直接 free(t) 会把仍挂在 loop 上的 uv 句柄留成悬垂节点。
+ *
+ * 已知边界:此刻若还有 in-flight 请求,tb_curl_op 包装层会泄漏
+ * (curl_multi_cleanup 会清掉 easy handle,但包装层是我们 malloc 的、
+ * 传输层没有在飞 op 链表可枚举)。正常流程下 destroy 发生在导航完成之后,
+ * 不存在在飞请求。 */
+static void curl_destroy(const tb_transport *self) {
+  tb_curl_transport *t = (tb_curl_transport *)self;
+  if (!t) return;
+  if (t->timer.data && !uv_is_closing((uv_handle_t *)&t->timer)) {
+    uv_timer_stop(&t->timer);
+    uv_close((uv_handle_t *)&t->timer, on_timer_closed);
+    if (t->loop) uv_run(t->loop, UV_RUN_NOWAIT);   /* 让 close 回调跑完 */
+    return;
+  }
+  /* 没有 loop 或句柄已关闭:直接收尾。 */
+  if (t->multi) curl_multi_cleanup(t->multi);
+  free(t);
+}
+
 tb_transport *tb_curl_transport_create(uv_loop_t *loop, const tb_config *cfg) {
   tb_curl_transport *t = calloc(1, sizeof *t);
   t->iface.open = curl_open;
   t->iface.cancel = curl_cancel;
   t->iface.poll = curl_poll;
+  t->iface.destroy = curl_destroy;
   t->loop = loop;
   t->ua = cfg->user_agent;
   t->ca_bundle = cfg->ca_bundle_path;

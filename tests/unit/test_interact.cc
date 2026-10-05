@@ -25,7 +25,15 @@ static void log_poll(const tb_transport *self) {
   (void)self;
   g_ft->base.poll(&g_ft->base);
 }
-static tb_transport wrap = { log_open, log_cancel, log_poll };
+/* destroy 留 NULL:wrap 借用 fake_transport 内嵌的 base,而 fake 不持有
+ * 需释放的堆资源(tb_destroy 只销毁 tb_create 自建的 transport,注入的这
+ * 个不在其列)。写成具名字段而非位置初始化,新增槽位时不会被静默错位。 */
+static tb_transport wrap = {
+  .open = log_open,
+  .cancel = log_cancel,
+  .poll = log_poll,
+  .destroy = NULL,
+};
 
 static tb_browser *setup(fake_transport *ft, fake_clock *fc, const char *html) {
   static fake_resp r;

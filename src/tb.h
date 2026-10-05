@@ -47,6 +47,17 @@ struct tb_transport {
   void *(*open)(const tb_transport *self, const tb_transport_req *req); /* 返回 op 句柄 */
   void (*cancel)(const tb_transport *self, void *op);
   void (*poll)(const tb_transport *self);   /* 推进传输;回调在内部触发 */
+  /* 释放传输自身持有的资源,可为 NULL(不持有任何需释放的东西)。
+   *
+   * tb_destroy 只在「传输由 tb_create 自己创建」时调用它 —— 也就是
+   * cfg.transport == NULL、tb_create 顺带建了默认 curl transport 的那条路。
+   * 调用方注入的 transport(cfg.transport 非 NULL)归调用方所有,browser
+   * 不碰其生命周期,因此也不会调它的 destroy。
+   *
+   * 存在的理由:curl_multi_handle() 会建一个内部连接池 easy handle,
+   * 此前没有任何地方调 curl_multi_cleanup(),长跑进程(或反复
+   * create/destroy 的测试)会持续累积。 */
+  void (*destroy)(const tb_transport *self);
 };
 
 typedef struct tb_clock {

@@ -587,7 +587,12 @@ tb_browser *tb_create(const tb_config *cfg) {
   b->js_doc = b->engine->open(b->engine, b);
   if (!b->js_doc) {
     tb_err e = { TB_ERR_PARSE, "JS engine failed to start" };
-    if (b->loop_init) uv_loop_close(&b->loop);
+    /* 失败路径同样要收拾自己建出来的 transport,否则 curl multi 泄漏。
+     * 顺序同 tb_destroy:transport 的 destroy 要先跑 loop。 */
+    if (b->loop_init) {
+      if (b->transport && b->transport->destroy) b->transport->destroy(b->transport);
+      uv_loop_close(&b->loop);
+    }
     free(b);
     return NULL;
   }
@@ -599,7 +604,15 @@ void tb_destroy(tb_browser *b) {
   if (!b) return;
   /* 引擎持有的 qzjs runtime(自有线程 + loop)必须显式关闭,否则线程泄漏。 */
   if (b->js_doc && b->engine) b->engine->close(b->engine, b->js_doc);
-  if (b->loop_init) uv_loop_close(&b->loop);
+  /* loop_init 同时意味着「默认 curl transport 是 tb_create 自己建的」
+   * (见 tb_create),所以只有这条路径才归我们销毁 —— 调用方注入的
+   * cfg.transport 生命周期归调用方,browser 不碰。
+   * 顺序:transport 的 destroy 内部要跑一次 loop 才能完成 libuv 的异步
+   * close,必须排在 uv_loop_close 之前。 */
+  if (b->loop_init) {
+    if (b->transport && b->transport->destroy) b->transport->destroy(b->transport);
+    uv_loop_close(&b->loop);
+  }
   tb_session_free(&b->session);
   tb_view_free(b->view);
   free(b->cookie_jar);
