@@ -17,6 +17,7 @@
 #include "tb.h"
 #include "view.h"
 #include "browser_internal.h"
+#include "url.h"
 #include <qzjs/qzjs.h>
 #include <cJSON.h>
 #include <string.h>
@@ -286,6 +287,10 @@ static const char *TB_BOOT_SRC =
   "  };"
   "});"
   "try { globalThis.console = __tb_console; } catch (e) {}"
+  /* window = globalThis 的别名。qzjs 提供了 self(=== globalThis)但没有 window,
+     而 window.x = v / window.location 是网页脚本最常见的写法 —— 缺了它,
+     一大批真实页面在第一行就 ReferenceError。别名指向同一对象,不是拷贝。 */
+  "try { if (typeof window === 'undefined') globalThis.window = globalThis; } catch (e) {}"
   "var __tb_pending = [];"
   "var __tb_root = null;"
   "var __tb_doc = null;"
@@ -387,7 +392,7 @@ static void js_engine_close(const struct tb_js_engine *self, void *handle) {
 
 /* 两段式:begin → 宿主抓 src → finish */
 static int js_engine_load_document(const struct tb_js_engine *self, void *handle,
-                                   const char *body, size_t len) {
+                                   const char *body, size_t len, const char *base_url) {
   (void)self;
   js_handle *h = (js_handle *)handle;
   if (!h || !h->rt) return -1;
@@ -407,34 +412,43 @@ static int js_engine_load_document(const struct tb_js_engine *self, void *handle
     return -1;
   }
 
-  /* 阶段二:宿主把每个 <script src> 同步抓下来(复用既有 tb_load_sync)。
+  /* 阶段二:宿主把每个 <script src> 同步抓下来(复用既有 tb_load_sync),
+   * 结果攒进一个 cJSON object,最后序列化交给 __tb_finish_load。
+   *
+   * 此前这里是字符串手术:map 从 "{}" 起手,每个条目 sprintf("%s,%s:%s",...)
+   * 往后追加,最后 map[strlen-1] = '}'。两处都是错的:
+   *   - 追加位置在 '{' 之后而不是之前,结果是 {},"k":"v" —— 花括号在左,
+   *     后面拖着一串悬空键值,根本不是合法 object;
+   *   - map[strlen-1] 想替换「尾 ','」,但此刻末尾是值的收尾引号,替换后把
+   *     引号吃掉,JSON 一样烂。实测外部脚本永远抓不到(页面仍渲染,因为
+   *     非法对象字面量被 finish_load 当成普通实参报错跳过,页面正文照跑)。
+   * 改用 cJSON 拼,序列化交给 cJSON_PrintUnformatted,转义/括号一律不手写。
+   *
+   * src 相对路径按 base_url 解析(HTML 语义:<script src> 相对文档 URL)。
+   * 拿不到 base(直接调 seam 的测试)时按绝对 URL 处理,解析失败就跳过该条。
+   *
    * srcs_json 是 js_inspect 里 strdup 出来的堆串,归本函数 free。 */
-  char *map = strdup("{}");
+  cJSON *mapobj = cJSON_CreateObject();
   cJSON *srcs = cJSON_Parse(srcs_json);
   if (srcs && cJSON_IsArray(srcs)) {
     cJSON *it = NULL;
     cJSON_ArrayForEach(it, srcs) {
       if (!cJSON_IsString(it) || !it->valuestring) continue;
+      const char *ref = it->valuestring;
+      char *abs = tb_url_resolve(base_url, ref);
+      if (!abs) continue;                    /* 解析不了:不猜,跳过这条 */
       char *code = NULL;
-      tb_err err = h->host ? tb_load_sync(h->host, it->valuestring, &code) : (tb_err){0};
-      if (err.code == 0 && code) {
-        char *k = json_string(it->valuestring, strlen(it->valuestring));
-        char *v = json_string(code, strlen(code));
-        if (k && v) {
-          char *bigger = (char *)malloc(strlen(map) + strlen(k) + strlen(v) + 4);
-          sprintf(bigger, "%s,%s:%s", map, k, v);
-          free(map);
-          map = bigger;
-        }
-        free(k);
-        free(v);
-      }
+      tb_err err = h->host ? tb_load_sync(h->host, abs, &code) : (tb_err){0};
+      if (err.code == 0 && code) cJSON_AddStringToObject(mapobj, ref, code);
       free(code);
+      free(abs);
     }
   }
   cJSON_Delete(srcs);
   free(srcs_json);
-  map[strlen(map) - 1] = '}';  /* 把尾 ',' 换成 '}' */
+  char *map = cJSON_PrintUnformatted(mapobj);
+  cJSON_Delete(mapobj);
+  if (!map) return -1;
 
   /* 阶段三:__tb_finish_load(map) → 跑脚本 + 置 readyState */
   size_t n2 = strlen(map) + 64;

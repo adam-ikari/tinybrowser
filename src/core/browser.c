@@ -91,7 +91,15 @@ tb_err tb_load_sync(tb_browser *b, const char *url, char **out) {
     b->transport->poll(b->transport);
     if (clk->now_ms(clk) - t0 > timeout) break;
   }
-  b->transport->cancel(b->transport, op);
+  /* 只有还在飞的 op 才 cancel。传输层的所有权约定是「on_done 一触发,传输层
+   * 就把 op 收走并释放」(curl_transport.c check_multi_info 在派发 on_done 之后
+   * 立即 free(op))。此前的代码无条件 cancel,于是拿着已释放的 op 去
+   * curl_multi_remove_handle —— use-after-free,真 curl 传输下必崩
+   * (<script src> 才会走到这条路径,所以单测全绿、集成一跑就 segfault)。
+   *
+   * fake transport 掩盖了它:fake_cancel 在 op 链表里找不到就静默返回,所以
+   * 单元测试永远看不到这处崩溃。别把「fake 不炸」当契约。 */
+  if (!ctx.done && !ctx.failed) b->transport->cancel(b->transport, op);
 
   *out = ctx.body ? ctx.body : strdup("");
   return (ctx.done && !ctx.failed) ? (tb_err){0, ""} : (tb_err){TB_ERR_TIMEOUT, "timeout"};
@@ -145,7 +153,7 @@ static void nav_on_done(void *ud, tb_err err) {
   if (kind == TB_CONTENT_RENDER) {
     /* 引擎驱动(M2a):qzjs 解析 HTML、跑脚本、产出视图。不再有 C 侧 DOM 树——
      * 交互(click/fill/select/submit)改为经控制面在 JS 自己的树上查询。 */
-    if (b->engine->load_document(b->engine, b->js_doc, c->body, c->body_len) != 0) {
+    if (b->engine->load_document(b->engine, b->js_doc, c->body, c->body_len, effective) != 0) {
       tb_session_nav_fail(&b->session);
       tb_err pe = { TB_ERR_PARSE, "document load failed" };
       if (b->cfg.on_error) b->cfg.on_error(b, pe, effective, b->cfg.ud);

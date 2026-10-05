@@ -175,7 +175,7 @@ TEST(JsEngine, LoadAndRenderSimple) {
   ASSERT_NE(h, nullptr);
 
   const char *html = "<title>Test</title><p>Hello world</p>";
-  ASSERT_EQ(eng->load_document(eng, h, html, strlen(html)), 0);
+  ASSERT_EQ(eng->load_document(eng, h, html, strlen(html), "http://x/"), 0);
 
   tb_view *v = tb_view_new();
   ASSERT_EQ(eng->render(eng, h, "http://test/", 200, v), 0);
@@ -194,7 +194,7 @@ TEST(JsEngine, ScriptExecutesInline) {
   ASSERT_NE(h, nullptr);
 
   const char *html = "<title>S</title><script>document.title = 'Changed';</script><p>ok</p>";
-  ASSERT_EQ(eng->load_document(eng, h, html, strlen(html)), 0);
+  ASSERT_EQ(eng->load_document(eng, h, html, strlen(html), "http://x/"), 0);
 
   tb_view *v = tb_view_new();
   ASSERT_EQ(eng->render(eng, h, "http://x/", 200, v), 0);
@@ -211,7 +211,7 @@ TEST(JsEngine, ScriptErrorIsolated) {
   ASSERT_NE(h, nullptr);
 
   const char *html = "<title>E</title><script>throw new Error('boom')</script><p>still ok</p>";
-  ASSERT_EQ(eng->load_document(eng, h, html, strlen(html)), 0);
+  ASSERT_EQ(eng->load_document(eng, h, html, strlen(html), "http://x/"), 0);
 
   tb_view *v = tb_view_new();
   ASSERT_EQ(eng->render(eng, h, "http://x/", 200, v), 0);

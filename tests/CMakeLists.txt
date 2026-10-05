@@ -107,6 +107,12 @@ target_include_directories(test_js_engine PRIVATE ${TB_TEST_INCS})
 target_link_libraries(test_js_engine PRIVATE tinybrowser qzjs gtest_main)
 gtest_discover_tests(test_js_engine)
 
+# M2a 端到端集成:真 HTTP server + 真 qzjs + 真 curl,走完整导航路径。
+add_executable(test_m2a_integration integration/test_m2a_integration.cc harness/http_server.cc)
+target_include_directories(test_m2a_integration PRIVATE ${TB_TEST_INCS})
+target_link_libraries(test_m2a_integration PRIVATE tinybrowser qzjs gtest_main)
+gtest_discover_tests(test_m2a_integration)
+
 # 纯 JS 单测:parser.js tokenizer。qjs 二进制 OUTPUT_NAME=qjs,目标名 qjs_exe。
 # quickjs-ng 移除全局 load(移入 std.loadScript,需 --std),
 # 故经 bootstrap.js 垫片还原 load 并预载 parser.js 暴露 _tb_parser。

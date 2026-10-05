@@ -70,7 +70,11 @@ extern const tb_clock tb_clock_real;
 struct tb_view;   /* 前置声明:render 成员的类型须与 view.h 的 struct tb_view 一致 */
 struct tb_js_engine {
   void *(*open)(const struct tb_js_engine *self, struct tb_browser *host);   /* 修正①:传 host 而非 cfg,支持 __tb_load_sync nested pump */
-  int   (*load_document)(const struct tb_js_engine *self, void *h, const char *body, size_t len);
+  /* 载入文档。base_url 是该文档的最终 URL(重定向后),用于按 HTML 语义解析
+     <script src> 等相对引用;可为 NULL(此时只接受绝对 URL)。
+     修正③:原签名没有 base,导致 <script src="/a.js"> 这类相对引用无法解析。 */
+  int   (*load_document)(const struct tb_js_engine *self, void *h, const char *body, size_t len,
+                         const char *base_url);
   int   (*render)(const struct tb_js_engine *self, void *h, const char *url, int status, struct tb_view *out);  /* 修正②:带 url/status,与 M1 tb_render 对齐 */
   int   (*eval)(const struct tb_js_engine *self, void *h, const char *code, char **out);  /* *out = malloc,调用方 free */
   void  (*poll_timers)(const struct tb_js_engine *self, void *h);
