@@ -304,19 +304,25 @@ static void nav_refresh_view(tb_browser *b) {
     free(fp);                              /* 没变,省掉重渲 */
     return;
   }
-  free(b->dom_fingerprint);
-  b->dom_fingerprint = fp;                 /* fp 归本字段 */
 
+  /* 顺序要紧:**先重渲、成功后再落指纹**。
+   * 反过来(先记指纹再渲染)的话,一旦 render 失败,指纹已经是新状态,
+   * 后续每次 pump 都判定「没变」→ 自动刷新被永久关闭,旧视图一直留着,
+   * 而且不报任何错。渲染失败(控制面偶发失败、JS 侧遍历抛异常等)本该
+   * 在下一次 pump 重试,前提是失败时保留旧指纹。 */
   tb_view *nv = tb_view_new();
-  if (!nv) return;
+  if (!nv) { free(fp); return; }
   if (b->engine->render(b->engine, b->js_doc, b->pending_url,
                         b->view->status, nv) == 0) {
+    free(b->dom_fingerprint);
+    b->dom_fingerprint = fp;               /* fp 归本字段 */
     tb_view_free(b->view);
     b->view = nv;
     if (b->cfg.on_title) b->cfg.on_title(b, tb_view_title(b->view), b->cfg.ud);
     if (b->cfg.on_view_changed) b->cfg.on_view_changed(b, b->cfg.ud);
   } else {
-    tb_view_free(nv);                      /* 渲染失败:保留旧视图 */
+    free(fp);              /* 保留旧指纹 → 下次 pump 重试 */
+    tb_view_free(nv);      /* 渲染失败:保留旧视图 */
   }
 }
 

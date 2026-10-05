@@ -108,8 +108,11 @@ static char *str_trim(char *s) {
   return s;
 }
 
-static int ci_prefix(const char *s, const char *pfx) {
-  return strncasecmp(s, pfx, strlen(pfx)) == 0;
+/* 属性名精确比较(大小写不敏感)。**不能**用前缀比较:那会让 `pathological=x`
+ * 被当成 `path`、`domainfoo=1` 被当成 `domain`,于是凭空的属性被采纳成
+ * domain/path。浏览器按精确名匹配,这里也该如此。 */
+static int attr_is(const char *name, const char *want) {
+  return strcasecmp(name, want) == 0;
 }
 
 /* ---- URL 拆解(只要 scheme/host/path,够 cookie 用) ---- */
@@ -272,12 +275,20 @@ void tb_cookie_jar_set(tb_cookie_jar *j, const char *raw, const char *req_url) {
     aname = str_trim(aname);
     if (aval) aval = str_trim(aval);
 
-    if (ci_prefix(aname, "domain"))       attr_domain = aval ? dup_str(aval) : NULL;
-    else if (ci_prefix(aname, "path"))    attr_path = aval ? dup_str(aval) : NULL;
-    else if (ci_prefix(aname, "secure"))  secure = 1;
-    else if (ci_prefix(aname, "httponly")) http_only = 1;
-    else if (ci_prefix(aname, "max-age")) { if (aval) { max_age = atoll(aval); have_max_age = 1; } }
-    else if (ci_prefix(aname, "expires")) { if (aval) expires = parse_http_date(aval); }
+    /* 重复属性(如 `a=1; domain=x; domain=y`)按后者胜 —— 与浏览器一致。
+       覆盖前必须释放前一个副本,否则泄漏(此前 attr_domain/attr_path 被直接
+       覆盖丢弃)。 */
+    if (attr_is(aname, "domain")) {
+      free(attr_domain);
+      attr_domain = aval ? dup_str(aval) : NULL;
+    } else if (attr_is(aname, "path")) {
+      free(attr_path);
+      attr_path = aval ? dup_str(aval) : NULL;
+    }
+    else if (attr_is(aname, "secure"))   secure = 1;
+    else if (attr_is(aname, "httponly")) http_only = 1;
+    else if (attr_is(aname, "max-age")) { if (aval) { max_age = atoll(aval); have_max_age = 1; } }
+    else if (attr_is(aname, "expires")) { if (aval) expires = parse_http_date(aval); }
     free(a);
     semi = comma;
   }

@@ -233,3 +233,24 @@ TEST(Cookie, NoSuffixBoundaryLeak) {
   ExpectHeader(j, "http://example.test.evil.com/", "");
   tb_cookie_jar_free(j);
 }
+/* 属性名按精确匹配,不按前缀 —— 否则凭空的属性会被采纳。 */
+TEST(Cookie, AttributeNameIsExactNotPrefix) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  /* pathological 不是 path:若按前缀匹配,会被当成 Path=ological=x */
+  tb_cookie_jar_set(j, "a=1; pathological=x", "http://example.test/");
+  ExpectHeader(j, "http://example.test/", "a=1");
+  /* domainfoo 不是 domain:不该把 host 换成 domainfoo */
+  tb_cookie_jar_set(j, "b=2; domainfoo=x", "http://example.test/");
+  ExpectHeader(j, "http://example.test/", "a=1; b=2");
+  EXPECT_EQ(tb_cookie_jar_count(j), 2);
+  tb_cookie_jar_free(j);
+}
+
+/* 重复属性按后者胜(与浏览器一致)。 */
+TEST(Cookie, RepeatedAttributeLastWins) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  tb_cookie_jar_set(j, "a=1; Path=/; Path=/deep", "http://example.test/deep/x");
+  ExpectHeader(j, "http://example.test/deep/x", "a=1");
+  ExpectHeader(j, "http://example.test/other", "");
+  tb_cookie_jar_free(j);
+}
