@@ -124,7 +124,13 @@ TEST(JsEngine, ConsoleMessageDoesNotCorruptReceipt) {
   tb_destroy(b);
 }
 
-/* ---- tb_eval_js over browser (no document loaded) ---- */
+/* ---- tb_eval_js over browser, before any document is loaded ----
+ * 语义变更(M2a 引擎驱动):引擎现在由 tb_create 就建立并持有,不再等到首次
+ * 导航。所以「没有文档」不再意味着「没有引擎」——
+ *   - 纯 JS 表达式可以正常求值;
+ *   - 依赖 document 的操作仍会失败,但因为没有文档(document._root 为 null),
+ *     而不是因为引擎不存在。
+ * tb_config.js_memory_limit 之类旧旋钮同理不再适用(见 brain 记录)。 */
 
 TEST(JsEngine, EvalJsOverBrowserNoDoc) {
   fake_clock fc; fake_clock_init(&fc);
@@ -134,8 +140,30 @@ TEST(JsEngine, EvalJsOverBrowserNoDoc) {
   cfg.clock = &fc.base;
   cfg.transport = &ft.base;
   tb_browser *b = tb_create(&cfg);
+  ASSERT_NE(b, nullptr);
+
+  /* 引擎已就绪 → 纯表达式可求值 */
   char *out = nullptr;
-  EXPECT_EQ(tb_eval_js(b, "1", &out).code, TB_ERR_NO_VIEW);
+  EXPECT_EQ(tb_eval_js(b, "1 + 2", &out).code, 0);
+  EXPECT_STREQ(out, "3");
+  free(out);
+
+  /* 但确实还没有文档:引擎活着,文档是空的 */
+  out = nullptr;
+  EXPECT_EQ(tb_eval_js(b, "String(document._root === null)", &out).code, 0);
+  EXPECT_STREQ(out, "true");
+  free(out);
+
+  /* 无文档时 render 必须拒绝,而不是渲染出一个空壳视图 */
+  tb_view *v = tb_view_new();
+  EXPECT_EQ(b->engine->render(b->engine, b->js_doc, "http://x/", 200, v), -1);
+  tb_view_free(v);
+
+  /* JS 语法错误照常如实上报 */
+  out = nullptr;
+  EXPECT_EQ(tb_eval_js(b, "this is ( not js", &out).code, TB_ERR_PARSE);
+  free(out);
+
   tb_destroy(b);
 }
 

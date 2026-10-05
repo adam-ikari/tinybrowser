@@ -157,9 +157,14 @@ function _tb_elem_info(id) {
   if (n.tag === "button") { o.form = _tb_form_of(n); }
   if (n.tag === "select") {
     o.options = [];
-    for (var k = 0; k < n.children.length; k++) {
-      var c = n.children[k];
-      if (c.type === "element" && c.tag === "option") o.options.push(c.textContent);
+    /* option 可能被包在其它标签里(optgroup 等),故迭代整棵子树,不能只看
+     * 直接子节点 —— 直接子节点遍历会把 select 的 textContent 整段取成
+     * 一个 option(实测 "en"+"zh" 拼成 "enzh")。 */
+    var st = [n];
+    while (st.length) {
+      var x = st.pop();
+      if (x.type === "element" && x.tag === "option") o.options.push(x.textContent);
+      for (var q = x.children.length - 1; q >= 0; q--) st.push(x.children[q]);
     }
   }
   return JSON.stringify(o);
@@ -175,4 +180,86 @@ function _tb_form_of(node) {
     p = p.parent;
   }
   return 0;
+}
+
+/* ---- 表单交互辅助(供 C 侧经控制面调用,不再走 C DOM 树) ----
+ * 交互全部改为「宿主发控制面 eval → JS 在自己树上查」,故 C 侧不再有
+ * find_node_by_id / collect_form_pairs,这些能力必须在 JS 侧提供。
+ * 统一返回 JSON 字符串(与 _tb_elem_info 一致),便于宿主 cJSON 解析。 */
+
+/* 视图 id → 节点。未渲染过的文档退回 getElementById。 */
+function _tb_node_by_id(id) {
+  var n = null;
+  if (typeof __tb_view_nodes === "object" && __tb_view_nodes[String(id)])
+    n = __tb_view_nodes[String(id)];
+  if (!n) n = document.getElementById(String(id));
+  return (n && n.type === "element") ? n : null;
+}
+
+/* form 的 action/method。未渲染文档用 getElementById 兜底。 */
+function _tb_form_info(formId) {
+  var f = _tb_node_by_id(formId);
+  if (!f || f.tag !== "form") return JSON.stringify({ ok: false });
+  return JSON.stringify({
+    ok: true,
+    action: f.attrs.action || "",
+    method: (f.attrs.method || "get").toLowerCase()
+  });
+}
+
+/* 收集 form 内所有具名控件,按文档序返回 [{id, name, value}]。
+ * value 优先取 tb_fill/tb_select 写在**节点自身**的 __tb_value,
+ * 否则回落 DOM 的 value 属性。
+ *
+ * 值必须存在节点上,不能另开一张 id → value 表:宿主传进来的是**渲染视图 id**
+ * (render.js 的计数器,经 __tb_view_nodes 映射到节点),而这里遍历拿到的是
+ * **解析节点 id**。两套 id 只有在简单文档上才碰巧相等 —— 实测
+ * `<form><input><select><button>` 上渲染 q=3 / 解析 q=2,查表直接落空,
+ * 提交出去的是原始 value 而非用户填的值。存在节点上则不存在换算问题。 */
+function _tb_form_pairs(formId) {
+  var f = _tb_node_by_id(formId);
+  if (!f || f.tag !== "form") return JSON.stringify({ ok: false, pairs: [] });
+  var pairs = [];
+  // 迭代遍历(禁递归),保持文档序
+  var stack = [f];
+  while (stack.length) {
+    var n = stack.pop();
+    if (n.type === "element" && (n.tag === "input" || n.tag === "select")) {
+      var name = n.attrs.name;
+      if (name) {
+        var val = n.__tb_value;
+        if (val === undefined || val === null) val = n.attrs.value || "";
+        pairs.push({ id: n.id, name: name, value: String(val) });
+      }
+    }
+    for (var k = n.children.length - 1; k >= 0; k--) stack.push(n.children[k]);
+  }
+  return JSON.stringify({ ok: true, pairs: pairs });
+}
+
+/* tb_fill / tb_select 的落点:把值记在节点上,提交时由 _tb_form_pairs 读。
+ * id 可以是渲染视图 id 或解析节点 id(_tb_node_by_id 两者都认)。 */
+function _tb_set_value(id, value) {
+  var n = _tb_node_by_id(id);
+  if (!n) return false;
+  n.__tb_value = String(value);
+  return true;
+}
+
+/* select 的 option 是否存在。宿主只传 id + option,判定在 JS 侧做——
+ * 在 C 里拼这段遍历表达式既难维护又会撑爆宿主侧的表达式缓冲(option 可能被
+ * optgroup 包住,必须遍历子树而非直接子节点)。
+ * 返回 true/false。 */
+function _tb_has_option(id, option) {
+  var n = _tb_node_by_id(id);
+  if (!n || n.tag !== "select") return false;
+  var want = String(option);
+  var st = [n];
+  while (st.length) {
+    var x = st.pop();
+    if (x.type === "element" && x.tag === "option" && x.textContent === want)
+      return true;
+    for (var q = x.children.length - 1; q >= 0; q--) st.push(x.children[q]);
+  }
+  return false;
 }

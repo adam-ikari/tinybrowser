@@ -2,8 +2,6 @@
 #include "browser_internal.h"
 #include "content.h"
 #include "curl_transport.h"
-#include "dom.h"
-#include "render.h"
 #include "session.h"
 #include "url.h"
 #include "view.h"
@@ -145,19 +143,23 @@ static void nav_on_done(void *ud, tb_err err) {
   }
   tb_content_kind kind = tb_content_classify(c->content_type, c->attachment);
   if (kind == TB_CONTENT_RENDER) {
-    tb_dom_free(b->dom);
-    b->dom = tb_dom_parse(c->body, c->body_len);
-    if (!b->dom) {
+    /* 引擎驱动(M2a):qzjs 解析 HTML、跑脚本、产出视图。不再有 C 侧 DOM 树——
+     * 交互(click/fill/select/submit)改为经控制面在 JS 自己的树上查询。 */
+    if (b->engine->load_document(b->engine, b->js_doc, c->body, c->body_len) != 0) {
       tb_session_nav_fail(&b->session);
-      tb_err pe = { TB_ERR_PARSE, "HTML parse failed" };
+      tb_err pe = { TB_ERR_PARSE, "document load failed" };
       if (b->cfg.on_error) b->cfg.on_error(b, pe, effective, b->cfg.ud);
       goto out;
     }
     tb_view_free(b->view);
-    b->view = tb_render(b->dom, effective, c->status);
+    b->view = tb_view_new();
+    if (b->engine->render(b->engine, b->js_doc, effective, c->status, b->view) != 0) {
+      tb_session_nav_fail(&b->session);
+      tb_err pe = { TB_ERR_PARSE, "render failed" };
+      if (b->cfg.on_error) b->cfg.on_error(b, pe, effective, b->cfg.ud);
+      goto out;
+    }
   } else {
-    tb_dom_free(b->dom);
-    b->dom = NULL;
     tb_view_free(b->view);
     b->view = tb_view_new();
     b->view->url = strdup(effective);
@@ -205,195 +207,335 @@ tb_err tb_navigate(tb_browser *b, const char *url) {
   return do_navigate(b, url, "GET", NULL, NULL, 0);
 }
 
-/* ---- 表单值存储 ---- */
-static fv_t *find_fv(tb_browser *b, int id, int create) {
-  for (int i = 0; i < b->nfv; i++) if (b->fv[i].id == id) return &b->fv[i];
-  if (create && b->nfv < 64) {
-    b->fv[b->nfv].id = id;
-    b->fv[b->nfv].value = NULL;
-    return &b->fv[b->nfv++];
-  }
-  return NULL;
-}
+/* 表单值的宿主侧存储(fv 表)已删:tb_fill/tb_select 现在写进 JS 的 __tb_fv,
+ * 提交时由 _tb_form_pairs 读出,不再需要宿主把值搬一遍。 */
 
-/* ---- DOM 遍历辅助 ---- */
-static tb_node *find_node_by_id(tb_browser *b, int id, const char **tag_out) {
-  tb_node *root = tb_dom_root(b->dom);
-  tb_node *found = NULL;
-  struct { tb_node *n; } stack[4096]; int sp = 0;
-  stack[sp++].n = root;
-  while (sp) {
-    tb_node *n = stack[--sp].n;
-    if (!n) continue;
-    if (tb_dom_is_element(n) && tb_dom_id(b->dom, n) == id) {
-      found = n;
-      if (tag_out) *tag_out = tb_dom_tag(n);
-      break;
+/* ---- 引擎查询辅助 ----
+ * 交互不再走 C DOM 树(find_node_by_id / collect_form_pairs 已删):节点查找、
+ * form 结构、控件枚举全部在 JS 侧,宿主经控制面 eval 取回 JSON。
+ * 下面的 js_* 把「发表达式 → 拿 JSON 文本」这件事收在一处。 */
+
+/* 从一段 JSON 文本里取顶层字符串字段的值(已反转义),写入 out。
+ * 只处理我们自己的 _tb_elem_info / _tb_form_info 输出:形状固定、值都是短
+ * 字符串或数字。嵌套对象/数组不解析(那些交给 JS 侧判断)。
+ * 字段不存在 → out[0]=0,返回 0。 */
+static int js_json_field(const char *json, const char *key, char *out, size_t cap) {
+  if (out && cap) out[0] = '\0';
+  if (!json || !key || !out || !cap) return 0;
+  char pat[64];
+  snprintf(pat, sizeof pat, "\"%s\":", key);
+  const char *p = strstr(json, pat);
+  if (!p) return 0;
+  p += strlen(pat);
+  while (*p == ' ') p++;
+  if (*p != '"') {
+    /* 数字 / true / false / null:原样拷贝到分隔符 */
+    size_t o = 0;
+    while (*p && *p != ',' && *p != '}' && o < cap - 1) out[o++] = *p++;
+    out[o] = '\0';
+    return 1;
+  }
+  p++;
+  size_t o = 0;
+  while (*p && o < cap - 1) {
+    if (*p == '\\' && p[1]) {
+      p++;
+      switch (*p) {
+        case 'n': out[o++] = '\n'; break;
+        case 't': out[o++] = '\t'; break;
+        case 'r': out[o++] = '\r'; break;
+        case '"': out[o++] = '"'; break;
+        case '\\': out[o++] = '\\'; break;
+        case '/': out[o++] = '/'; break;
+        default: out[o++] = *p; break;   /* \uXXXX 退化为原字节 */
+      }
+      p++;
+      continue;
     }
-    for (tb_node *ch = tb_dom_first_child(n); ch; ch = tb_dom_next_sibling(ch))
-      if (sp < 4096) stack[sp++].n = ch;
+    if (*p == '"') break;
+    out[o++] = *p++;
   }
-  return found;
+  out[o] = '\0';
+  return 1;
 }
 
-static int node_in_subtree(tb_node *root, tb_node *target) {
-  struct { tb_node *n; } st[4096]; int sp = 0;
-  for (tb_node *ch = tb_dom_first_child(root); ch; ch = tb_dom_next_sibling(ch))
-    if (sp < 4096) st[sp++].n = ch;
-  while (sp) {
-    tb_node *y = st[--sp].n;
-    if (y == target) return 1;
-    for (tb_node *ch = tb_dom_first_child(y); ch; ch = tb_dom_next_sibling(ch))
-      if (sp < 4096) st[sp++].n = ch;
-  }
-  return 0;
+/* 同上,取整数字段。 */
+static int js_json_int_field(const char *json, const char *key, int *out) {
+  char buf[32];
+  if (!js_json_field(json, key, buf, sizeof buf)) return 0;
+  if (!buf[0]) return 0;
+  *out = atoi(buf);
+  return 1;
 }
 
-static tb_node *find_containing_form(tb_browser *b, tb_node *n) {
-  struct { tb_node *n; } st[4096]; int sp = 0;
-  st[sp++].n = tb_dom_root(b->dom);
-  while (sp) {
-    tb_node *x = st[--sp].n;
-    if (!x) continue;
-    if (tb_dom_is_element(x) && strcmp(tb_dom_tag(x), "form") == 0 &&
-        node_in_subtree(x, n))
-      return x;
-    for (tb_node *ch = tb_dom_first_child(x); ch; ch = tb_dom_next_sibling(ch))
-      if (sp < 4096) st[sp++].n = ch;
+/* 把字符串转义成可嵌入 JS 双引号字面量的形式(含外层引号)。
+ * 放不下返回 0。 */
+static int js_escape_into(char *out, size_t cap, const char *s) {
+  size_t o = 0;
+  if (cap < 3) return 0;
+  out[o++] = '"';
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    char esc[8];
+    const char *rep = esc;
+    size_t replen = 1;
+    switch (*p) {
+      case '"':  rep = "\\\""; replen = 2; break;
+      case '\\': rep = "\\\\"; replen = 2; break;
+      case '\n': rep = "\\n";  replen = 2; break;
+      case '\r': rep = "\\r";  replen = 2; break;
+      case '\t': rep = "\\t";  replen = 2; break;
+      default:
+        if (*p < 0x20) {
+          snprintf(esc, sizeof esc, "\\u%04x", *p);
+          replen = 6;
+        } else {
+          esc[0] = (char)*p;
+          esc[1] = '\0';
+          replen = 1;
+        }
+    }
+    if (o + replen + 2 > cap) return 0;
+    memcpy(out + o, rep, replen);
+    o += replen;
   }
-  return NULL;
+  out[o++] = '"';
+  out[o] = '\0';
+  return 1;
+}
+
+/* _tb_form_pairs 的输出 {"ok":true,"pairs":[{id,name,value}...]} → urlencoded
+ * query 片段。数组元素在 JS 侧已是固定顺序,这里按 "pairs": 之后逐个对象取
+ * name/value。取不到就跳过该对(宁可少字段,不产出坏的 query)。 */
+static char *js_pairs_to_query(const char *json) {
+  size_t cap = 256, len = 0;
+  char *out = malloc(cap);
+  if (!out) return NULL;
+  out[0] = '\0';
+  const char *p = json ? strstr(json, "\"pairs\":") : NULL;
+  if (!p) return out;
+  p += 8;
+  for (;;) {
+    const char *ob = strchr(p, '{');
+    if (!ob) break;
+    const char *oe = strchr(ob, '}');
+    if (!oe) break;
+    /* 截出一个对象字面量,交给 js_json_field 取字段 */
+    size_t n = (size_t)(oe - ob) + 1;
+    char *obj = malloc(n + 1);
+    if (!obj) break;
+    memcpy(obj, ob, n);
+    obj[n] = '\0';
+    char name[512] = {0}, value[2048] = {0};
+    if (js_json_field(obj, "name", name, sizeof name) && name[0] &&
+        js_json_field(obj, "value", value, sizeof value)) {
+      char *en = tb_url_encode(name);
+      char *ev = tb_url_encode(value);
+      if (en && ev) {
+        size_t need = strlen(en) + strlen(ev) + 4;
+        if (len + need > cap) { cap = (len + need) * 2; out = realloc(out, cap); }
+        if (len) out[len++] = '&';
+        strcpy(out + len, en); len += strlen(en);
+        out[len++] = '=';
+        strcpy(out + len, ev); len += strlen(ev);
+      }
+      free(en); free(ev);
+    }
+    free(obj);
+    p = oe + 1;
+  }
+  out[len] = '\0';
+  return out;
+}
+
+/* 在引擎里求值一个返回 JSON 字符串的表达式,结果 strdup 给调用方。
+ * 失败返回 NULL。 */
+static char *js_query(tb_browser *b, const char *expr) {
+  if (!b || !b->js_doc || !b->engine) return NULL;
+  char *out = NULL;
+  if (b->engine->eval(b->engine, b->js_doc, expr, &out) != 0) {
+    free(out);
+    return NULL;
+  }
+  return out;   /* 可能是 "null" —— 调用方按需判 */
+}
+
+/* 求值一个返回 boolean 的表达式;成功返回 0/1,失败返回 -1。 */
+static int js_query_bool(tb_browser *b, const char *expr) {
+  char *r = js_query(b, expr);
+  if (!r) return -1;
+  int v = (strcmp(r, "true") == 0) ? 1 : 0;
+  free(r);
+  return v;
 }
 
 /* ---- 交互 ---- */
 tb_err tb_click(tb_browser *b, int id) {
   if (!b) { tb_err e = { TB_ERR_ARG, "bad args" }; return e; }
-  const char *tag = NULL;
-  tb_node *n = find_node_by_id(b, id, &tag);
-  if (!n) { tb_err e = { TB_ERR_NO_ELEM, "no such element" }; return e; }
+  if (!b->js_doc) { tb_err e = { TB_ERR_NO_VIEW, "no document" }; return e; }
+  char expr[128];
+  /* _tb_elem_info 返回 {tag, href?, type?, form?, options?} 的 JSON 串 */
+  snprintf(expr, sizeof expr, "_tb_elem_info(%d)", id);
+  char *info = js_query(b, expr);
+  if (!info) { tb_err e = { TB_ERR_NO_ELEM, "element query failed" }; return e; }
+
+  /* 从 JSON 里取字段。这里不引 cJSON:tb_elem_info 的输出是我们自己写的,
+   * 形状固定,用轻量取键即可(值里的转义由 JSON 保证,此处只取短字段)。 */
+  char tag[32] = {0};
+  char href[1024] = {0};
+  char itype[32] = {0};
+  int form_id = 0;
+  js_json_field(info, "tag", tag, sizeof tag);
   if (strcmp(tag, "a") == 0) {
-    const char *href = tb_dom_attr(n, "href");
-    if (!href) { tb_err e = { TB_ERR_ARG, "link has no href" }; return e; }
+    js_json_field(info, "href", href, sizeof href);
+    if (href[0] == '\0') { free(info); tb_err e = { TB_ERR_ARG, "link has no href" }; return e; }
     char *target = tb_url_resolve(tb_session_url(&b->session), href);
+    free(info);
     if (!target) { tb_err e = { TB_ERR_ARG, "bad href" }; return e; }
     tb_err r = do_navigate(b, target, "GET", NULL, NULL, 0);
     tb_free(target);
     return r;
   }
+  int is_button_submit = 0;
   if (strcmp(tag, "button") == 0) {
-    tb_node *form = find_containing_form(b, n);
-    if (!form) { tb_err e = { TB_ERR_NO_ELEM, "button not in form" }; return e; }
-    return tb_submit(b, tb_dom_id(b->dom, form));
+    is_button_submit = 1;
+  } else if (strcmp(tag, "input") == 0) {
+    js_json_field(info, "type", itype, sizeof itype);
+    if (strcmp(itype, "submit") == 0 || strcmp(itype, "button") == 0 ||
+        strcmp(itype, "reset") == 0) is_button_submit = 1;
   }
-  /* render 层把 input[type=submit|button|reset] 归为 "button",这里对齐 */
-  if (strcmp(tag, "input") == 0) {
-    const char *itype = tb_dom_attr(n, "type");
-    if (itype && (strcmp(itype, "submit") == 0 || strcmp(itype, "button") == 0 ||
-                  strcmp(itype, "reset") == 0)) {
-      tb_node *form = find_containing_form(b, n);
-      if (!form) { tb_err e = { TB_ERR_NO_ELEM, "button not in form" }; return e; }
-      return tb_submit(b, tb_dom_id(b->dom, form));
+  if (is_button_submit) {
+    /* form id:button 由 _tb_form_of 给出;input 由 JS 补查 */
+    if (!js_json_int_field(info, "form", &form_id)) {
+      snprintf(expr, sizeof expr, "String(_tb_form_of(_tb_node_by_id(%d)) || 0)", id);
+      char *fs = js_query(b, expr);
+      form_id = fs ? atoi(fs) : 0;
+      free(fs);
     }
+    free(info);
+    if (form_id <= 0) { tb_err e = { TB_ERR_NO_ELEM, "button not in form" }; return e; }
+    return tb_submit(b, form_id);
   }
+  free(info);
   tb_err e = { TB_ERR_ARG, "element not clickable" };
   return e;
 }
 
+/* node_in_subtree / find_containing_form 已删:form 归属改由 JS 侧
+ * _tb_form_of 沿 parent 链求出(它与渲染 id 同域,无需 C 树)。 */
+
+/* ---- 交互 ---- */
 tb_err tb_fill(tb_browser *b, int id, const char *value) {
   if (!b || !value) { tb_err e = { TB_ERR_ARG, "bad args" }; return e; }
-  const char *tag = NULL;
-  tb_node *n = find_node_by_id(b, id, &tag);
-  if (!n) { tb_err e = { TB_ERR_NO_ELEM, "no such element" }; return e; }
-  if (strcmp(tag, "input") != 0) { tb_err e = { TB_ERR_ARG, "not an input" }; return e; }
-  fv_t *f = find_fv(b, id, 1);
-  free(f->value);
-  f->value = strdup(value);
+  if (!b->js_doc) { tb_err e = { TB_ERR_NO_VIEW, "no document" }; return e; }
+  char expr[128];
+  snprintf(expr, sizeof expr, "_tb_elem_info(%d)", id);
+  char *info = js_query(b, expr);
+  if (!info) { tb_err e = { TB_ERR_NO_ELEM, "element query failed" }; return e; }
+  char tag[32] = {0};
+  js_json_field(info, "tag", tag, sizeof tag);
+  if (strcmp(tag, "input") != 0) {
+    free(info);
+    tb_err e = { TB_ERR_ARG, "not an input" };
+    return e;
+  }
+  free(info);
+  /* 值写进 JS 侧 __tb_fv;提交时由 _tb_form_pairs 读出。 */
+  char esc[2048];
+  if (!js_escape_into(esc, sizeof esc, value)) {
+    tb_err e = { TB_ERR_ARG, "value too long" };
+    return e;
+  }
+  snprintf(expr, sizeof expr, "String(_tb_set_value(%d, %s))", id, esc);
+  int rc = js_query_bool(b, expr);
+  if (rc < 0) { tb_err e = { TB_ERR_PARSE, "set value failed" }; return e; }
   tb_err ok = { 0, "" };
   return ok;
 }
 
 tb_err tb_select(tb_browser *b, int id, const char *option) {
   if (!b || !option) { tb_err e = { TB_ERR_ARG, "bad args" }; return e; }
-  const char *tag = NULL;
-  tb_node *n = find_node_by_id(b, id, &tag);
-  if (!n) { tb_err e = { TB_ERR_NO_ELEM, "no such element" }; return e; }
-  if (strcmp(tag, "select") != 0) { tb_err e = { TB_ERR_ARG, "not a select" }; return e; }
-  /* 校验 option 存在 */
-  int okv = 0;
-  for (tb_node *ch = tb_dom_first_child(n); ch; ch = tb_dom_next_sibling(ch)) {
-    if (tb_dom_is_element(ch) && strcmp(tb_dom_tag(ch), "option") == 0) {
-      const char *txt = tb_dom_text(tb_dom_first_child(ch));
-      if (txt && strcmp(txt, option) == 0) { okv = 1; break; }
-    }
+  if (!b->js_doc) { tb_err e = { TB_ERR_NO_VIEW, "no document" }; return e; }
+  char expr[128];
+  snprintf(expr, sizeof expr, "_tb_elem_info(%d)", id);
+  char *info = js_query(b, expr);
+  if (!info) { tb_err e = { TB_ERR_NO_ELEM, "element query failed" }; return e; }
+  char tag[32] = {0};
+  js_json_field(info, "tag", tag, sizeof tag);
+  if (strcmp(tag, "select") != 0) {
+    free(info);
+    tb_err e = { TB_ERR_ARG, "not a select" };
+    return e;
   }
-  if (!okv) { tb_err e = { TB_ERR_ARG, "no such option" }; return e; }
-  fv_t *f = find_fv(b, id, 1);
-  free(f->value);
-  f->value = strdup(option);
+  free(info);
+
+  /* option 成员判定放在 JS 侧(_tb_has_option):option 可能被 optgroup 包住,
+   * 需要遍历子树,把它写成宿主侧的表达式既难读又容易撑爆表达式缓冲。 */
+  char qopt[1024];
+  if (!js_escape_into(qopt, sizeof qopt, option)) {
+    tb_err e = { TB_ERR_ARG, "option too long" };
+    return e;
+  }
+  snprintf(expr, sizeof expr, "String(_tb_has_option(%d, %s))", id, qopt);
+  int found = js_query_bool(b, expr);
+  if (found <= 0) { tb_err e = { TB_ERR_ARG, "no such option" }; return e; }
+
+  char esc[2048];
+  if (!js_escape_into(esc, sizeof esc, option)) {
+    tb_err e = { TB_ERR_ARG, "option too long" };
+    return e;
+  }
+  snprintf(expr, sizeof expr, "String(_tb_set_value(%d, %s))", id, esc);
+  int rc = js_query_bool(b, expr);
+  if (rc < 0) { tb_err e = { TB_ERR_PARSE, "set value failed" }; return e; }
   tb_err ok = { 0, "" };
   return ok;
 }
 
-/* 把 parent 的子节点按文档序压入栈(先压最后一个,使第一个在栈顶) */
-static void push_children_doc_order(tb_node *parent, struct { tb_node *n; } *st, int *sp) {
-  tb_node *kids[4096]; int nk = 0;
-  for (tb_node *ch = tb_dom_first_child(parent); ch && nk < 4096; ch = tb_dom_next_sibling(ch))
-    kids[nk++] = ch;
-  while (nk > 0 && *sp < 4096) st[(*sp)++].n = kids[--nk];
-}
-
-/* 收集 form 内所有命名控件 name=value(已 urlencode),返回 query 片段 */
-static char *collect_form_pairs(tb_browser *b, tb_node *form) {
-  size_t cap = 256, len = 0;
-  char *out = malloc(cap);
-  out[0] = '\0';
-  struct { tb_node *n; } st[4096]; int sp = 0;
-  push_children_doc_order(form, st, &sp);
-  while (sp) {
-    tb_node *n = st[--sp].n;
-    if (tb_dom_is_element(n)) {
-      const char *tag = tb_dom_tag(n);
-      const char *name = tb_dom_attr(n, "name");
-      if (name && (strcmp(tag, "input") == 0 || strcmp(tag, "select") == 0)) {
-        fv_t *f = find_fv(b, tb_dom_id(b->dom, n), 0);
-        const char *val = f ? f->value : tb_dom_attr(n, "value");
-        if (!val) val = "";
-        char *en = tb_url_encode(name);
-        char *ev = tb_url_encode(val);
-        int need = (int)strlen(en) + (int)strlen(ev) + 8;
-        if (len + (size_t)need > cap) { cap = (len + (size_t)need) * 2; out = realloc(out, cap); }
-        if (len) out[len++] = '&';
-        strcpy(out + len, en); len += strlen(en);
-        out[len++] = '=';
-        strcpy(out + len, ev); len += strlen(ev);
-        free(en); free(ev);
-      }
-    }
-    push_children_doc_order(n, st, &sp);
-  }
-  out[len] = '\0';
-  return out;
-}
+/* push_children_doc_order / collect_form_pairs 已删:控件枚举与取值改由
+ * JS 侧 _tb_form_pairs 完成(它能直接看到 __tb_fv 里 tb_fill/tb_select 写的值,
+ * 不需要宿主把 C 侧 fv 表再搬一遍)。 */
 
 tb_err tb_submit(tb_browser *b, int form_id) {
   if (!b) { tb_err e = { TB_ERR_ARG, "bad args" }; return e; }
-  const char *tag = NULL;
-  tb_node *form = find_node_by_id(b, form_id, &tag);
-  if (!form || strcmp(tag, "form") != 0) { tb_err e = { TB_ERR_NO_ELEM, "no such form" }; return e; }
-  const char *action = tb_dom_attr(form, "action");
+  if (!b->js_doc) { tb_err e = { TB_ERR_NO_VIEW, "no document" }; return e; }
+
+  /* form 的 action/method 来自 JS 侧 _tb_form_info */
+  char expr[128];
+  snprintf(expr, sizeof expr, "_tb_form_info(%d)", form_id);
+  char *finfo = js_query(b, expr);
+  if (!finfo) { tb_err e = { TB_ERR_NO_ELEM, "form query failed" }; return e; }
+  char ok[16] = {0}, action[1024] = {0}, method[16] = {0};
+  js_json_field(finfo, "ok", ok, sizeof ok);
+  if (strcmp(ok, "true") != 0) {
+    free(finfo);
+    tb_err e = { TB_ERR_NO_ELEM, "no such form" };
+    return e;
+  }
+  js_json_field(finfo, "action", action, sizeof action);
+  js_json_field(finfo, "method", method, sizeof method);
+  free(finfo);
+
   const char *base = tb_session_url(&b->session);
-  char *target = tb_url_resolve(base ? base : "http://localhost/", action ? action : "");
+  char *target = tb_url_resolve(base ? base : "http://localhost/", action[0] ? action : "");
   if (!target) { tb_err e = { TB_ERR_ARG, "bad action" }; return e; }
-  char *pairs = collect_form_pairs(b, form);
-  const char *method = tb_dom_attr(form, "method");
-  int is_post = method && strcmp(method, "post") == 0;
+
+  /* 控件对由 JS 侧 _tb_form_pairs 收集(已按文档序、已合并 tb_fill/tb_select 的值) */
+  snprintf(expr, sizeof expr, "_tb_form_pairs(%d)", form_id);
+  char *pj = js_query(b, expr);
+  char *pairs = pj ? js_pairs_to_query(pj) : strdup("");
+  free(pj);
+  if (!pairs) pairs = strdup("");
+
+  int is_post = strcmp(method, "post") == 0;
   tb_err r;
   if (is_post) {
     r = do_navigate(b, target, "POST", pairs, "application/x-www-form-urlencoded", 0);
   } else {
-    /* GET:追加 query */
-    size_t n = strlen(target) + strlen(pairs) + 2;
+    size_t n = strlen(target) + strlen(pairs) + 3;
     char *withq = malloc(n);
-    snprintf(withq, n, "%s?%s", target, pairs);
+    /* pairs 为空时不要留一个裸 "?" */
+    if (pairs[0]) snprintf(withq, n, "%s?%s", target, pairs);
+    else snprintf(withq, n, "%s", target);
     r = do_navigate(b, withq, "GET", NULL, NULL, 0);
     tb_free(withq);
   }
@@ -438,17 +580,28 @@ tb_browser *tb_create(const tb_config *cfg) {
   }
   b->transport = b->cfg.transport;
   b->engine = b->cfg.js_engine ? b->cfg.js_engine : tb_default_js_engine();
+  /* 引擎在 create 时就起来(而非首次导航时):tb_fill/tb_select/tb_submit 直接
+   * 经控制面向 JS 树查询,若 js_doc 只在 nav_on_done 里建,这些 API 在导航前
+   * (以及渲染失败后)就没有可问的对象。qzjs 的 runtime 拥有自己的线程,
+   * 提前建立也让首次导航少一次冷启动。 */
+  b->js_doc = b->engine->open(b->engine, b);
+  if (!b->js_doc) {
+    tb_err e = { TB_ERR_PARSE, "JS engine failed to start" };
+    if (b->loop_init) uv_loop_close(&b->loop);
+    free(b);
+    return NULL;
+  }
   tb_session_init(&b->session, b->cfg.clock, b->cfg.idle_grace_ms);
   return b;
 }
 
 void tb_destroy(tb_browser *b) {
   if (!b) return;
+  /* 引擎持有的 qzjs runtime(自有线程 + loop)必须显式关闭,否则线程泄漏。 */
+  if (b->js_doc && b->engine) b->engine->close(b->engine, b->js_doc);
   if (b->loop_init) uv_loop_close(&b->loop);
   tb_session_free(&b->session);
-  tb_dom_free(b->dom);
   tb_view_free(b->view);
-  for (int i = 0; i < b->nfv; i++) free(b->fv[i].value);
   free(b->cookie_jar);
   free(b);
 }
