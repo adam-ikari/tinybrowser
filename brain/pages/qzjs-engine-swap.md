@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [js, qzjs, quickjs, engine, submodule]
 created: "2026-10-04T14:05:26"
-updated: "2026-10-05T05:27:43"
+updated: "2026-10-05T23:46:12"
 ---
 
 <!-- compiled_truth -->
@@ -189,9 +189,20 @@ create→导航(含子资源抓取)→destroy,并断言外部脚本的全局变�
 - ✅ 导航与交互**已完全**改由 qzjs 引擎驱动(`nav_on_done` 走 engine seam,C 侧 DOM 树已删)。
   交互(click/fill/select/submit)经控制面在 JS 自己的树上查询
   (`_tb_elem_info`/`_tb_form_info`/`_tb_form_pairs`)。
-- 缺 `window`(已补)/ `location`(未补)/ `document.cookie` 的真实现(当前单串往返)。
-- `js_on_console` 的 drain 只在控制面往返与 `poll_timers` 发生;若宿主长时间不泵,console 帧会堆积。
-- 定时器回调改了 DOM 后宿主视图不会自动刷新,需显式重新 render。
+- ✅ `window` / `location` / `history` / `navigator.userAgent` 已补齐;`document.cookie`
+  从**假实现**换成真 jar(此前 `__tb_cookie` 从未定义,读恒为 ""、写静默失效)。
+- ✅ `tb_pump` 现在会排空 JS 邮箱 —— 此前**从不**调 `poll_timers`,而邮箱是 qzjs 唯一的
+  出站通道,等于 console 帧堆积且 `location.href=…` 的导航指令永远没人执行。
+- ✅ 定时器改 DOM 后视图自动刷新(JS 侧 DOM 指纹比对,变了才重渲)。
+- cookie jar **刻意不做**的部分(已知缺口,非遗漏):无 public suffix 列表
+  (eTLD+1 判断缺席,`Domain=com` 这类跨站泄漏防不住)、无 SameSite、不持久化。
+  「看起来对但语义错」比不做更危险,故在 `cookie.h` 里写明。
+- ⚠️ **qzjs 不回调宿主 ⇒「宿主函数」不可用**。读侧(location.href / UA / cookie)靠宿主
+  在导航提交前 `op:"eval"` 推给 `__tb_env`(无往返开销);写侧(location.href= / back / 
+  document.cookie=)靠 JS `postMessage` 进邮箱、宿主 `poll_timers` 时取出执行。
+  新增任何宿主能力都必须在这两个方向里选,不能写成 C 函数指针。
+- ⚠️ **qzjs 的 polyfill 会预设 `navigator.userAgent='qzjs/1.0 (WinterTC)'`**。页面跑在浏览器里,
+  必须覆盖成浏览器 UA,否则服务端 UA 嗅探误判;但不要整体替换 `navigator` 对象。
 - 「内嵌代码不进库」只查了 `src/js/*.js`;若将来还有别的 configure 期生成物,同样要审。
 
 
@@ -273,4 +284,16 @@ create→导航(含子资源抓取)→destroy,并断言外部脚本的全局变�
   kind: decision
   summary: "提交前复核:补回改写 compiled truth 时丢失的「qzos 那份 checkout 未推送、勿当基准」结论"
   source: "提交前逐条核对 compiled truth 与 HEAD 的差异"
+  affects: [qzjs-engine-swap]
+
+- time: 2026-10-05T23:46:06
+  kind: decision
+  summary: "浏览器 API 补齐完成(cookie/location/history/navigator + tb_pump 排空邮箱 + 定时器驱动重渲),并确立「qzjs 无宿主回调 ⇒ 读push/写postMessage」这条新增能力的方向"
+  source: "commit fb87cc0;ASAN+UBSAN+leak 114/114 零泄漏"
+  affects: [qzjs-engine-swap]
+
+- time: 2026-10-05T23:46:12
+  kind: reversal
+  summary: "推翻「遗留只是 console 帧堆积 + 定时器需手动重渲」:真正的大头是 tb_pump 从不调 poll_timers。qzjs 从不回调宿主,邮箱是它唯一出站通道,不排它等于把 JS 的对外输出全堵死 —— console 堆积只是症状,location.href= 发出的导航指令永远没人执行才是要害"
+  source: "实现 location 写侧时实测发现指令无人消费"
   affects: [qzjs-engine-swap]
