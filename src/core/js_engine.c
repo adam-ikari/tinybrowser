@@ -457,6 +457,27 @@ static const char *TB_BOOT_SRC =
   "var __tb_pending = [];"
   "var __tb_root = null;"
   "var __tb_doc = null;"
+  /* <script> 不一定是脚本。application/ld+json、text/template、importmap 之类
+   * 的内容是**数据**不是 JS。type 缺失(或空)才是普通脚本;type 是 JavaScript
+   * MIME 类型或 module 时也是。
+   *
+   * 此前一律当 JS 求值,后果有二:
+   *   - 结构化数据块的 JSON 抛 "expecting ';'",每个带 JSON-LD 的页面一条假报错;
+   *   - 更糟的是带 src 的数据块会被**真的抓下来** —— 比如
+   *     <script type="application/json" src="/big.json">,那个 URL 根本不是脚本,
+   *     却产生了一次本不该有的网络请求。
+   * MIME 类型取 ';' 前的 essence(参数要剥掉),比 type="text/javascript;charset=utf-8"。 */
+  "var __tb_js_types = {'':1,'module':1,'application/ecmascript':1,'application/javascript':1,"
+  "'application/x-ecmascript':1,'application/x-javascript':1,'text/ecmascript':1,"
+  "'text/javascript':1,'text/javascript1.0':1,'text/javascript1.1':1,'text/javascript1.2':1,"
+  "'text/javascript1.3':1,'text/javascript1.4':1,'text/javascript1.5':1,'text/jscript':1,"
+  "'text/livescript':1,'text/x-ecmascript':1,'text/x-javascript':1};"
+  "var __tb_is_js_script = function (s) {"
+  "  var t = s.type;"
+  "  if (t == null) return true;   /* 无 type/language:普通脚本 */"
+  "  t = String(t).split(';')[0].trim().toLowerCase(); /* 剥掉 ;charset= 之类参数 */"
+  "  return __tb_js_types[t] === 1;"
+  "};"
   /* 阶段一:解析 + 收集脚本。返回 src 数组(值,不是 JSON 文本——宿主用
    * op:"inspect" 取回,inspect 自带 JSON.stringify,这里再 stringify 会双编码)。 */
   "var __tb_begin_load = function (body) {"
@@ -468,6 +489,7 @@ static const char *TB_BOOT_SRC =
   "  __tb_pending = [];"
   "  var srcs = [], s;"
   "  while ((s = p.next_script()) !== null) {"
+  "    if (!__tb_is_js_script(s)) continue;   /* 数据块:既不执行也不抓取 */"
   "    __tb_pending.push({ src: s.src || null, text: s.src ? null : s.text });"
   "    if (s.src) srcs.push(s.src);"
   "  }"

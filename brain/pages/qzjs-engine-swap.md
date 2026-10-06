@@ -5,13 +5,11 @@ category: decision
 status: active
 tags: [js, qzjs, quickjs, engine, submodule]
 created: "2026-10-04T14:05:26"
-updated: "2026-10-06T00:41:47"
+updated: "2026-10-06T04:27:03"
 ---
 
 <!-- compiled_truth -->
-# JS 引擎迁移到 qzjs（qzjs-engine-swap）
-
-## 结论:已落地并全绿(122/122;ASAN+UBSAN+leak 全新构建 122/122 零泄漏)
+## 结论:已落地并全绿(149/149;ASAN+UBSAN+leak 全新构建 149/149 零泄漏)
 
 ## 定位:qzjs 不是 QuickJS 的 drop-in,而是「邮箱 + 事件循环」运行时
 - `adam-ikari/qzjs` = *Embeddable QuickJS-ng runtime with PAL*。JS 跑在**库自有线程 + 自有 uv loop** 上。
@@ -21,54 +19,32 @@ updated: "2026-10-06T00:41:47"
 - 因此「宿主直接拿到 `JSContext*` 同步 eval」这条路**默认不存在**——JSContext 归 qzjs 线程独占。
 
 ## 定案一:子模块(从自己 GitHub 克隆)
-- `deps/qzjs` → `https://github.com/adam-ikari/qzjs.git`,钉在 `ba4dd940bc27aff9f1f5b4309a1f6688af8674f0`
-  (= 克隆时的 GitHub `master` HEAD)。shallow clone(`--depth 1`)。
-- qzjs 自身还有 8 个嵌套子模块;只初始化 4 个:`quickjs-ng@6d46d07` / `libuv@84af0b1` /
-  `miniz@77d0dce` / `mbedtls@068ff08`。
-- **故意不初始化**:`wamr`(体量最大,tinybrowser 无 wasm 需求)、`wasm3`、`lz4`
-  (仅 `QZ_POLYFILL_MODE=compressed` 需要,默认 `rodata`)、`googletest`。
-- ⚠️ **`deps/qzjs/deps/mbedtls` 还有第三层嵌套子模块 `framework`(mbedtls-framework),
-  必须初始化**,否则 mbedTLS 的 CMake config 步骤报
-  "framework/CMakeLists.txt not found … Run: git submodule update --init"。
-- ✅ **指针已切到 qzjs master(`478e6e7`,2026-10-06)**。PR #1/#2/#3 均已合并,「等 PR #1
-  合并后再切」的条件已满足。此前"指向 master 会让 https fetch 全部失败、qz_destroy
-  崩溃回归"的顾虑已不适用。
-  ⚠️ 切换时的一个反直觉现象:**qzjs 走 squash merge**(见其 #3 定的分支规范),故
-  PR #1 的 5 个提交被压成一条 `896539c`,我们之前跟踪的 `ab55d71` **不是 master 的
-  祖先**。这不是改动丢失 —— squash 的正常结果。**核对办法是逐项查内容,不能只看 SHA**:
-  `rt->http_ops = op` / `op->cb` 的 CANCELLED 分支 / 诊断串 / read idle timeout 四处,
-  以及 `test/test_http_inflight_teardown_gtest.cpp` 都在 master 的树里。
-  代价正是我在其 PR #3 评审里预警过的:commit message 里的论证不进 master。
-- ⚠️ **`/home/gem/project/qzos/qzjs` 是同一上游的另一份 checkout**,它的本地提交(`1d438237`
-  等)多半**未推送到 GitHub** —— `git branch -r --contains <sha>` 在该 checkout 里查不到任何
-  远程分支。**以 GitHub master 为准,不要拿本地那份当基准**,否则会把只存在于本地的改动
-  误当成上游已有能力。
+- `deps/qzjs` → `https://github.com/adam-ikari/qzjs.git`,现钉在 master `478e6e7`(PR #1/#2/#3 均已合并)。
+- shallow clone(`--depth 1`)。qzjs 自身还有 8 个嵌套子模块;只初始化 4 个:
+  `quickjs-ng` / `libuv` / `miniz` / `mbedtls`。
+- **故意不初始化**:`wamr`(体量最大)、`wasm3`、`lz4`(仅 `QZ_POLYFILL_MODE=compressed` 需要,默认 `rodata`)、`googletest`。
+- ⚠️ **`deps/qzjs/deps/mbedtls` 还有第三层嵌套子模块 `framework`(mbedtls-framework),必须初始化**。
+- ⚠️ qzjs 走 squash merge,故本地跟踪的旧 SHA 不是 master 的祖先。**核对办法是逐项查内容,不能只看 SHA**。
+- ⚠️ **`/home/gem/project/qzos/qzjs` 是同一上游的另一份 checkout**,它的本地提交多半未推送。
+  **以 GitHub master 为准**,否则会把只存在于本地的改动误当成上游已有能力。
 
 ## 定案二:进程模型 = THREAD(单进程)
-- `QZ_PROCESS_MODEL=THREAD`。ISOLATED(qzjs 默认)要随包部署 `qzjs-rt` 可执行档并在执行期定位它,
-  对 TUI 浏览器是不必要的负担。
-- 代价:拿不到跨进程 liveness ping(`qz_ping*` 仅 ISOLATED 编译存在)。用 `qz_ping_if_available()`
-  跨模型探测,THREAD 下恒返回 `QZ_PING_UNAVAILABLE(-2)`——**不谎报健康**。
+- `QZ_PROCESS_MODEL=THREAD`。ISOLATED 要随包部署 `qzjs-rt` 可执行档,对 TUI 浏览器是不必要的负担。
+- 代价:拿不到跨进程 liveness ping。用 `qz_ping_if_available()` 探测,THREAD 下恒返回
+  `QZ_PING_UNAVAILABLE(-2)`——**不谎报健康**。
 
-## 定案三:同步 eval 走控制面 `op:"eval"`,**不需要** `QZ_EXTRA_SOURCES`(推翻早先建议)
-- 早先建议「用 `QZ_EXTRA_SOURCES` 把自有 .c 编进 libqzjs 直接拿 JSContext 做同步 eval」。**作废**——
-  qzjs 已原生提供这条路,走公开 API 即可,且不违反主权原则、升级时不受内部头文件变动影响。
-- 链路:`qz_control(rt, cmd)` → msgq → qzjs 线程的 `qz_wake_cb`(`src/thread.c:88`)
-  → `flags==QZ_MSG_FLAG_CONTROL` 分支 → `qz_control_dispatch`(`src/control.c:998`)
-  → `ctl_eval`(`src/control.c:884`)在**qzjs 线程上** `JS_Eval` → 回执入邮箱。
+## 定案三:同步 eval 走控制面 `op:"eval"`,不需要 `QZ_EXTRA_SOURCES`(推翻早先建议)
+- 链路:`qz_control(rt, cmd)` → msgq → qzjs 线程 `qz_wake_cb` → `flags==QZ_MSG_FLAG_CONTROL`
+  → `qz_control_dispatch` → `ctl_eval` **在 qzjs 线程上** `JS_Eval` → 回执入邮箱。
 - 命令 `{"op":"eval","correl":"<id>","timeout_ms":T,"script":"<code>"}`;回执
-  `{"ctl":true,"correl":"<id>","ok":1,"result":<val>}`;异常时 `ok:0` + `error` + `code`
-  (`JS_EXCEPTION`/`INTERRUPTED`/`INVALID_ARG`/`UNKNOWN_CMD`/`NOT_FOUND`/`BAD_REQUEST`/`TIMEOUT`)。
+  `{"ctl":true,"correl":"<id>","ok":1,"result":<val>}`;异常时 `ok:0` + `error` + `code`。
 - `op:"inspect"` = 求值 + `JS_JSONStringify` → 回执 `json` 字段。**用它取代逐字段搬 `tb_view`。**
-- `src/control.c` 在 `_qz_core_sources` 里是**无条件**的(CMakeLists:734),只有
-  `control_endpoint.c`(LOCAL 档 uv_pipe 端点)是 ISOLATED-only → **THREAD 下控制面可用**。
-- 必须 `cfg.control_plane = QZ_CONTROL_IN_PROC`(默认 `QZ_CONTROL_OFF` 让 `qz_control` 恒 -1)。
+- `src/control.c` 是**无条件**编译的,只有 `control_endpoint.c`(LOCAL 档 uv_pipe 端点)是 ISOLATED-only
+  → **THREAD 下控制面可用**。必须 `cfg.control_plane = QZ_CONTROL_IN_PROC`(默认 OFF 恒 -1)。
 - `correl` 是回执**唯一**配对依据,缺/空/非字符串会被硬拒。唯一豁免是 `op:"interrupt"`。
 
 ## 定案四:删掉 tinybrowser 自带的 quickjs-ng / libuv / mbedtls
-- 目标名冲突是硬阻塞:qzjs `add_subdirectory` 它那份 quickjs-ng/libuv/mbedtls,产出与
-  tinybrowser **同名**的 target(`qjs`/`uv_a`/`mbedtls`+`mbedx509`+`mbedcrypto`),
-  同一次 configure 里定义两次直接报错。
+- 目标名冲突是硬阻塞:qzjs 产出与 tinybrowser **同名**的 target(`qjs`/`uv_a`/`mbedtls`+`mbedx509`+`mbedcrypto`)。
 - qzjs 还要给它的 quickjs-ng 打 5 个补丁(C99 atomics / drain-jobs / bc-reader-hardening /
   debugger / libuv-c99-atomics),是工作树改动 → quickjs-ng **必须**来自 qzjs 子模块。
 - 连带:libcurl 的 ExternalProject 改指 `deps/qzjs/deps/mbedtls`;`test_tls` 的 include 也改。
@@ -76,149 +52,103 @@ updated: "2026-10-06T00:41:47"
 ## 落地后的接口变更
 - `tb_config.js_memory_limit` **已删除**(qzjs 无 `JS_SetMemoryLimit` 对应旋钮,用户确认接受失效)。
   OOM 现在表现为引擎自身抛 JS 异常 → eval 回执 `ok:0`。
-- `js_exec_ms_limit` 语义改为「控制面回执窗口」,默认 5000ms(对齐 qzjs `ctl_extract` 缺省),
-  超时投递 `op:"interrupt"`。
-- 6 个 `__tb_*` host bridge 全部消失。console 改走 `postMessage` 进邮箱 → 宿主
-  `poll_timers` / 控制面往返途中派发到 `cfg.on_console`。定时器改由 qzjs polyfill 提供
-  (宿主不再有 timer 链表)。
-- `<script src>` 改**两段式**:`__tb_begin_load(body)` 解析并返回 src 列表 → 宿主用既有
-  `tb_load_sync` 批量抓取 → `__tb_finish_load(map)` 执行。解析只做一次。
-- **`load_document` seam 加了 `base_url` 参数**(修正③):`<script src>` 必须相对文档最终 URL
-  解析,原签名没有 base,相对引用根本无法工作。相对 src 解析不了就跳过该条,不猜。
+- `js_exec_ms_limit` 语义改为「控制面回执窗口」,默认 5000ms,超时投递 `op:"interrupt"`。
 
 ## 构建要点(踩过的坑)
-- **qzjs 内嵌 polyfill 字节码是构建产物,不入库**。fresh clone 必须
-  `npm --prefix deps/qzjs/polyfill ci`,然后**重新 configure**(qzjs 在 configure 期查工具链)。
-  已加 `message(WARNING)` 在 tinybrowser 的 CMakeLists 里提前说清这件事。
-- ⚠️ **「内嵌代码不进库」这条规律对 tinybrowser 自己同样成立**:`tb_embed_js` 原先在
-  configure 期把 `src/js/*.js` 直接 `file(WRITE)` 成 `js_builtins.inc`,此后无人再生成它。
-  后果是**改完任意 `.js` 直接 `make`,编进去的还是旧 JS**,构建系统对源码改动完全无感。
-  已改成 `add_custom_command(OUTPUT)` + 独立执行体 `cmake/embed_js_run.cmake`,依赖 `.js` 内容、
-  `.js` 文件集合(`CONFIGURE_DEPENDS`)与生成脚本自身。**教训:凡是 configure 期 file(WRITE)
-  出来的构建产物,都要当成陈旧缓存审一遍。**
-- **切勿用 `set(QZ_WITH_WAMR OFF CACHE ... FORCE)` 关 wamr**:qzjs 的 profile-switch 块
-  (`deps/qzjs/CMakeLists.txt:169`)在 `add_subdirectory` 期间会用 FORCE 把整组 `QZ_WITH_*`
-  重写一遍,外层 set(无论前置还是普通变量)都被盖掉。正确做法是 `QZ_PROFILE=minimal`
-  (它就是「不要 wasm」的档位)。
-- 但 minimal 顺带把 **TLS 也关了**,而浏览器没 TLS 就只能看明文页。qzjs 的 profile-switch
-  在 `add_subdirectory` 内跑完,所以**在其之后**再 `set(QZ_WITH_TLS ON CACHE BOOL "" FORCE)`
-  才不会被回写。最终缓存:`THREAD` / `minimal` / `QZ_WITH_TLS=ON` / `QZ_WITH_WAMR=OFF`。
-  ⚠️ 这条后来又被推翻,见 Timeline 最后一条。
-- `cjson` 是 qzjs 的 PUBLIC 依赖,宿主 `#include <cJSON.h>` 解析回执无需额外配置。
+- qzjs 自己的测试套件需要:`-DQZ_BUILD_TESTS=ON -DQZ_PROCESS_MODEL=THREAD -DQZ_PROFILE=minimal
+  -DQZ_PROFILE_LAST=minimal -DQZ_WITH_TLS=ON -DQZ_WITH_WAMR=OFF`。**单设 `QZ_WITH_WAMR=OFF` 会被
+  qzjs 自己的 profile-switch 块静默覆盖。**
+- `gh pr list`(GraphQL)会超时;用 `gh api repos/adam-ikari/qzjs/...`(REST)。
 
 ## 实现期踩到的 bug(都是「测试看着像引擎坏了,其实是自己写错」)
-1. **inspect 会自动 `JSON.stringify`**。在表达式里再包一层 `JSON.stringify(...)` → 双层编码,
-   宿主拿到 `"\"true\""` 而非 `"true"`,strcmp 判不中 → 误判「文档没加载」。
-   `__tb_begin_load` 因此改成 `return srcs`(返回数组本身),布尔探针改用 `op:"eval"` + `String(...)`。
-2. **cJSON 取嵌套字段取错层级**:`level`/`msg` 在 `__tb_console` 对象**里面**,最初从 root 上取,
-   静默丢掉整条 console 消息。
-3. **硬编码表达式长度**:`js_eval(..., 24, ...)` 少一个字符 → `SyntaxError: Unexpected end of input`。
-   改用 `sizeof(STR)-1`。
-4. **`window` 在 qzjs 里不存在**(有 `self`,且 `self === globalThis`)。`window.x = v` 是网页脚本
-   最常见写法,缺了它大批真实页面第一行就 ReferenceError。已在 boot 脚本里补
-   `globalThis.window = globalThis` 别名(同一对象,非拷贝)。`location` 同样缺失,尚未补。
+(略)
 
 ## 子资源抓取(`<script src>`)—— 集成测试挖出的四个 bug
-这条路径**此前从未被真正跑过**:单元测试全用 fake transport,而 fake 恰好把最严重的那个藏住了。
-端到端集成测试(真 HTTP server + 真 qzjs + 真 curl)的第一个 `<script src>` 用例直接 segfault。
-
-1. **use-after-free**:`tb_load_sync` 无条件 `transport->cancel(op)`,但传输层的所有权约定是
-   「on_done 一触发就收走并释放 op」(`check_multi_info` 派发 `on_done` 后立即 `free(op)`)。
-   于是拿着野指针 `curl_multi_remove_handle`。fake transport 的 `cancel` 在链表里找不到就静默
-   返回 → **单元测试永远看不到这处崩溃**。修法:只在 op 仍在飞(既没 done 也没 failed)时 cancel。
-2. **reentrancy(已修)**:传输回调与引擎工作**两段分离**。
-   - 传输回调(`on_headers`/`on_body`/`on_done`)只搬数据、登记,不做任何引擎工作;
-     `on_done` 把 `nav_ctx` 挂进 `b->nav_ready` 就返回。
-   - 引擎侧的一切(`load_document`/`render`,含 `<script src>` 子资源抓取)由 `tb_pump`
-     在循环顶层调 `nav_commit_ready` 做 —— 那时才真正离开 curl 的栈。
-   - 配套:`pending` 计数在 commit 时才递减。若在 `on_done` 里就 `nav_done`,
-     `tb_session_idle` 会提前变真,`tb_pump` 可能在 commit 之前返回,调用方拿到的是
-     上一张视图。让 pending 挂到 commit 完成,pump 才可能判空闲。
-   - `tb_destroy` 排空 `nav_ready` + `nav_inflight` 两个队列:`nav_ctx` 自己 malloc
-     且带整页 body,传输层只管自己的 op。详见「导航中销毁的泄漏」。
-3. **坏 JSON**:map 从 `"{}"` 起手、每条 `sprintf("%s,%s:%s")` 往后追加 —— 花括号在左,后面拖一串
-   悬空键值,不是合法 object;末行 `map[strlen-1]='}'` 想替换「尾 `,`」,但此刻末尾是值的收尾
-   引号,替换后吃掉引号。**后果隐蔽**:非法对象字面量被 `finish_load` 当普通实参报错跳过,页面正文
-   照常渲染 —— 看起来一切正常,只是外部脚本永远没跑。改用 cJSON 拼 object、
-   `cJSON_PrintUnformatted` 序列化。
-4. **相对 `src` 从不解析**:裸相对路径直接丢给 transport,curl 拿到无 host 的路径 → 见上面
-   `load_document` 加 `base_url`。
+(略)
 
 ## 导航生命周期:两段式(定稿)
-`do_navigate` → 传输回调(搬运/登记)→ `b->nav_ready` 队列 → `tb_pump` 顶层
-`nav_commit_ready`(引擎工作)→ 视图 + session + 回调。
-
-- 传输层**不回收 `nav_ctx`**,它只管自己的 op;`nav_ctx` 由宿主在 commit 或
-  `tb_destroy` 时回收。
-- `nav_inflight` 链表在 `do_navigate` 里、**早于** `open` 挂链 —— `open` 可能同步
-  派发回调。
-
-## 导航中销毁的泄漏(先前就存在,被新测试挖出)
-调用方在导航途中直接 `tb_destroy`(不 `tb_wait_idle`),`on_done` 永不触发,
-`do_navigate` 的 `calloc` 就成了泄漏 —— ASAN 实测 216B 直接 + 28B 间接(含整页
-body)。这条路径此前从没被测过。加 `nav_inflight` 链表 + `tb_destroy` 排空解决。
+- `nav_commit_ready` 的引擎工作必须在 **`tb_pump` 顶层**,绝不能放进传输回调(那是 curl 重入 UB)。
+- `tb_pump` 四步固定顺序:① 轮询传输 → ② `poll_timers` → ③ 排空 JS 邮箱(nav 指令 + cookie 写)→ ④ 提交就绪导航。
 
 ## UB 类修复:必须证明测试能变红
-「测试没崩」**证明不了** UB 修好了 —— 表现随版本、时序、栈布局变化。同一个
-reentrancy bug,在修 UAF 之前就曾以「页面照常渲染,只是脚本没跑」的形式静默存在。
-
-所以这类修复的验收标准是:**临时回退修复,确认测试变红**。本次回退后
-`EngineWorkStaysOutsideTransportCallback` 的 `reentrant_calls` 从 0 变 2,测试变红,
-才恢复。绿测试若没被证明能变红,就只是一张空断言。
-
-测量手段:`tests/harness/guard_transport.h` —— 自包含极简 transport,在派发回调
-期间置 `in_callback`,统计回调期间发生的 `open`/`poll` 次数。
-门禁是 `reentrant_calls == 0`,**且必须配 `callback_count >= 2`** —— 少了后一条,
-bug 回归时测试会「因为没进那条路」而假绿。这与 fake transport 藏住 UAF 是同一种
-陷阱,同一个错误不能踩两次。
+- 方法固定为 `tools/verify_fixes.sh`:备份 → 逐条破坏 → 构建 → 跑指定测试 → 断言「真的红了」→ 恢复。
+  **「仍然全绿」本身就是结论**,说明那条测试没钉住修复,要么补测试要么删掉不可观察的逻辑。
 
 ## 测试替身比被测物更宽容 = 盲区(方法论教训)
-fake transport 的 `cancel` / `fake_open` 在「不认识的 op」上静默返回,于是把 UAF 完全吸收。
-**凡是替身比被测物更宽容的地方,单测全绿都是假信号。** 判断某条路径是否真的被覆盖,要问
-「测试里有没有任何一处会真的失败」—— `ExternalScriptSrc` 与
-`RepeatedSubresourceLoadsDoNotCorruptTransport` 就是为回答这个问题写的:后者 5 轮
-create→导航(含子资源抓取)→destroy,并断言外部脚本的全局变量逐轮累加到 5,证明它每轮都真跑了,
-而不只是「没崩」。
+(略)
 
 ## 测试分层(定稿)
-- `tests/unit/test_js_engine.cc` —— 直接驱 engine seam(`open`/`load_document`/`render`),
-  **不碰网络**。验的是「引擎能否加载一段 HTML 字符串」。
-- `tests/integration/test_m2a_integration.cc` —— 真 HTTP server + 真 qzjs + 真 curl,
-  走完整导航路径(`tb_navigate` → transport → `nav_on_done` → engine)。验的是「导航一次,
-  脚本/console/定时器在真实链路里是否成立」。单元测试绕过的那一段(nav_on_done 的引擎接线、
-  tb_pump 的驱动、`cfg.on_console` 的路由)恰是最容易接错的地方。
-- `tests/js/*.test.js` —— 纯 JS 单测(qjs + bootstrap 垫片),覆盖 parser/dom/render。
-- `tests/goldens/` —— `golden_runner` 驱 seam 出视图 dump 逐字节比对。
-- `tests/harness/guard_transport.h` —— 观测用 transport,不测时序,只测「重入没发生」。
+(略)
+
+## ⚠️ boot 脚本是 C 字符串拼接:字面量里不能有 `//`(已加门禁)
+- `TB_BOOT_SRC` 是一长串相邻 C 字符串字面量,**C 拼接它们时不换行**。于是字面量内部的一个
+  `//` 行注释会把**后面的字面量整段吃掉** —— C 编译器毫无察觉,boot 脚本却少了一行,
+  表现为 `qz_create failed (abi 1)`,而 abi 版本照常打印,**完全看不出原因**。
+- 本轮就被这个坑了一次:三处 `//` 注释吃掉相邻语句,`qz_create` 直接失败,排查方向一度跑偏
+  (怀疑引擎 ABI、怀疑自己新增的 MIME 表里有裸 `/` 键 —— 后者其实是误判,键本来已加引号)。
+- **门禁:`tools/check_boot_js.py`** —— 从 js_engine.c 抽出拼接后的 boot 源码与 `src/js/*.js`
+  一起交给 `node --check`,并额外警告字面量内的 `//`。新增 boot 代码后必须跑它。
+
+## HTML 解析器的两个隐患类别(本轮挖出并修完)
+- **`src/js/parser.js` 的 chunk 边界不变性此前完全不成立。** `feed()` 是流式接口、切点由网络决定,
+  但原文有四处「needle 横跨 chunk 就永远失配」:
+  1. `raw`(script/style)最严重 —— `</script` 一旦跨切点,整个 `<script>` 连同其后**所有**正文
+     被当成脚本内容,元素直接消失。喂 25 字节的 chunk 恰好不踩到,换个切点就中招。
+  2. `comment` —— 切在 `--` 与 `>` 之间时注释再也不会闭合,余下整篇文档被吞进注释。
+  3. `text` —— 缓冲区恰好断在 `<` 之后时把 `<` 当字面,`<title>` 被切成 `<` + `title>` 后整个元素
+     连同正文变成纯文本。修的时候还踩了一步:先 `i = lt + 1` 再 return,下个 chunk 从 `lt+1` 接着扫,
+     那个 `<` 被永久跳过 —— **比不修更隐蔽**,游标必须留在 `lt`。
+  4. `pi` —— **修不了也没必要修**:PI 内容整段被丢弃(既不入 DOM 也不记 warnings),
+     「少扫末尾一个字节」不可能改变任何可观察输出。留尾部的写法是假的,已删,并在代码里
+     写明「将来若改成保留 PI 文本,必须同时补上」。这类**不可观察的防御性代码同样是负债**。
+- **修法统一为「needle 找不到时,末尾 needle.length-1 字节不消费,等下次 feed」。**
+- 测试:`tests/js/parser.test.js` 里做**穷举切点不变性** —— 20 份文档 × 每个字节偏移,
+  外加三刀切(小文档),要求 DOM / scripts / warnings 与整段解析**逐字节一致**。约 3400 条断言。
+  这类性质测试比逐个手写用例强:它不会漏掉你没想的切点。
+
+## `<script>` 不一定是脚本(本轮修,已在生产链路生效)
+- parser 只负责把 `type`(缺失时回退到过时别名 `language`)记在脚本记录上;
+  **「算不算脚本」是加载器的策略**(`js_engine.c` 的 `__tb_is_js_script`,按 JavaScript MIME essence 白名单)。
+- 修前的两个后果:① 内容被 eval —— 结构化数据的 JSON 抛 `expecting ';'`,而 `<style>` 的 CSS
+  更是**每个带样式的页面**都拿到一条 `script error: ... is not defined` 假报错;
+  ② 带 `src` 的数据块会**真的发起一次网络请求**去抓一个根本不是脚本的 URL(唯一有外部副作用的一条)。
+- 连带:`RAW` 含 `script` 与 `style`,此前两者都塞进 `scripts`,现只收 `script`。
+
+## 其余 HTML 规范偏差(已修)
+- **数值实体按码点解释**,此前用 `String.fromCharCode` → `&#x1F600;` 被截成 U+F600(私有区码位),
+  渲染成无意义字形。改 `fromCodePoint`,并把 NUL / 代理区 / 越界映射到 U+FFFD(规范要求)。
+  ⚠️ 写这条时我把原来 `&nbsp;` 那个**不可见的 U+00A0 字节**改成了普通空格 —— 教训:
+  **解析器源码里不要放裸的非 ASCII 字面量,一律用 `\uXXXX` 转义。**
+- **属性名一律小写**(规范在 tokenizer 就做了)。标签名早已小写,属性名漏了。而 `dom.js` 取值
+  一律用小写键(`n.attrs.href` / `.class` / `.id`)→ `<a HREF=/x>` 的 href 是空、**链接是死的**。
+- **重复属性保留第一个**(规范丢弃后者),此前后者覆盖前者。
+- **raw 闭合标签名后必须紧跟分隔符**(空白 / `/` / `>`)。此前没有这个判断,
+  `</scriptfoo>` 会闭合 script,把后面的正文吃成 HTML。
+- **文档在 raw 元素中途结束时,那段内容仍是一段完整脚本**(EOF 结束 raw 文本)。
+  此前直接丢弃 —— 下载被截断时脚本就此消失。
 
 ## 现状与遗留
-- ✅ 导航与交互**已完全**改由 qzjs 引擎驱动(`nav_on_done` 走 engine seam,C 侧 DOM 树已删)。
-  交互(click/fill/select/submit)经控制面在 JS 自己的树上查询
-  (`_tb_elem_info`/`_tb_form_info`/`_tb_form_pairs`)。
-- ✅ `window` / `location` / `history` / `navigator.userAgent` 已补齐;`document.cookie`
-  从**假实现**换成真 jar(此前 `__tb_cookie` 从未定义,读恒为 ""、写静默失效)。
-- ✅ `tb_pump` 现在会排空 JS 邮箱 —— 此前**从不**调 `poll_timers`,而邮箱是 qzjs 唯一的
-  出站通道,等于 console 帧堆积且 `location.href=…` 的导航指令永远没人执行。
-- ✅ 定时器改 DOM 后视图自动刷新(JS 侧 DOM 指纹比对,变了才重渲)。
-- cookie jar **刻意不做**的部分(已知缺口,非遗漏):无完整 public suffix 列表、
-  无 SameSite、不持久化。「看起来对但语义错」比不做更危险,故在 `cookie.h` 里写明。
-  ⚠️ 更正此前一处**过重**的表述:曾写「`Domain=com` 这类跨站泄漏防不住」——
-  实测**不成立**,`cookie_domain_attr` 要求 domain 是请求 host 的后缀,故
-  evil.test 声明 Domain=com 会被拒,cookie 不会发往 bank.com。真正缺的是
-  「拒绝裸 TLD」这一条(仅当请求 host 本身就是 com 时才被接受)。
-- ⚠️ **cookie 的 domain 匹配不看端口**(RFC 6265,cookie 无端口属性)。实现时踩过:
-  host 里留着 `:8080` 会让**任何显式 `Domain=` 的 cookie 在非默认端口上整条丢弃**
-  (开发服务器上 Domain= 全部设不进去且无提示)。host-only 当时"能用"是巧合 ——
-  端口嵌在 domain 字符串里、两边恰好相等。已在 `url_split` 里剥端口。
-  剥的时候要处理 IPv6 方括号(`[::1]:8080` 的方括号内冒号不是端口)与
-  「端口段非数字 ⇒ fail closed」,细节见 `cookie.c` 的 strip_port。
-- ⚠️ **qzjs 不回调宿主 ⇒「宿主函数」不可用**。读侧(location.href / UA / cookie)靠宿主
-  在导航提交前 `op:"eval"` 推给 `__tb_env`(无往返开销);写侧(location.href= / back / 
-  document.cookie=)靠 JS `postMessage` 进邮箱、宿主 `poll_timers` 时取出执行。
-  新增任何宿主能力都必须在这两个方向里选,不能写成 C 函数指针。
-- ⚠️ **qzjs 的 polyfill 会预设 `navigator.userAgent='qzjs/1.0 (WinterTC)'`**。页面跑在浏览器里,
-  必须覆盖成浏览器 UA,否则服务端 UA 嗅探误判;但不要整体替换 `navigator` 对象。
-- 「内嵌代码不进库」只查了 `src/js/*.js`;若将来还有别的 configure 期生成物,同样要审。
+- ✅ 导航与交互**已完全**改由 qzjs 引擎驱动。交互经控制面在 JS 自己的树上查询。
+- ✅ `window` / `location` / `history` / `navigator.userAgent` 已补齐;`document.cookie` 是真 jar。
+- ✅ `tb_pump` 会排空 JS 邮箱(此前从不调 `poll_timers`,等于 nav 指令永远没人执行)。
+- ✅ 定时器改 DOM 后视图自动刷新(JS 侧 DOM 指纹比对)。
+- ✅ **坏 UTF-8 替换成 U+FFFD**(`json_escape`)。此前一个坏字节会让整个 eval 失败,
+  整页连正文都渲染不出来(`json_string` 违背了自己「产出可安全嵌入 JS 字面量的字节」的职责)。
+- ⚠️ **chunk 切分缺陷目前是潜在的,不是活的**:`__tb_begin_load` 走的是 `p.feed(body)` 一次喂全量,
+  今天没有生产路径能踩到。但 `feed()` 是 parser 的公开 API 且它本就是流式 tokenizer,
+  性质测试已把不变量钉住,改成真分块喂也不会再退化。
+- cookie jar **刻意不做**的部分(已知缺口,非遗漏):无完整 public suffix 列表、无 SameSite、不持久化。
+  真正缺的是「拒绝裸 TLD」这一条(仅当请求 host 本身就是 com 时才被接受)。
+- ⚠️ **cookie 的 domain 匹配不看端口**。`strip_port` 要处理 IPv6 方括号与「端口段非数字 ⇒ fail closed」。
+- ⚠️ **qzjs 不回调宿主 ⇒「宿主函数」不可用**。读侧靠 `op:"eval"` 推给 `__tb_env`;
+  写侧靠 JS `postMessage` 进邮箱、宿主 `poll_timers` 取出执行。新增宿主能力必须在这两个方向里选。
+- ⚠️ **qzjs 的 polyfill 会预设 `navigator.userAgent='qzjs/1.0 (WinterTC)'`**,必须覆盖成浏览器 UA,
+  但不要整体替换 `navigator` 对象。
+- ⚠️ `<meta charset>` **被解析但未被使用**。GBK/Latin-1 页面按 UTF-8 处理,需要转码表,
+  不在 M2a 范围内。当前只是不崩(坏字节替换成 U+FFFD),不是正确解码。
+- ⚠️ `<base href>` **被解析进树但未用于相对 URL 解析**。相对 href/src 仍按文档 URL 解析。
+  `dom.js` 的选择器只支持 `tag` / `.class` / `#id` / `tag.class`,不支持属性选择器。
+- `tb_url_encode` 仍会对已有的 `%XX` 二次编码(有测试钉住当前行为,尚未修)。
 
 
 ## Timeline
@@ -329,4 +259,10 @@ create→导航(含子资源抓取)→destroy,并断言外部脚本的全局变�
   kind: decision
   summary: "指针已切到 qzjs master(PR #1/#2/#3 全部合并);记录 squash merge 导致旧 SHA 非 master 祖先这个反直觉现象及核对办法"
   source: "commit 7690f12;全新 build 122/122、ASAN 零泄漏"
+  affects: [qzjs-engine-swap]
+
+- time: 2026-10-06T04:27:03
+  kind: decision
+  summary: "已落地并全绿(149/149;ASAN+UBSAN+leak 全新构建 149/149 零泄漏);新增 chunk 边界不变性测试、boot 脚本语法门禁、<script type> 策略、HTML 规范偏差一批"
+  source: "M2a:复杂页面压力测试(坏 UTF-8 + parser 缺陷批次)"
   affects: [qzjs-engine-swap]

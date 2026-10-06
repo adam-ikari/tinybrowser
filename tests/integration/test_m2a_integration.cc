@@ -825,3 +825,189 @@ TEST(BrowserApi, ValidUtf8PassesThroughUnchanged) {
   tb_view_free(v);
   tb_destroy(b);
 }
+
+/* ---- <script> 不一定是脚本:数据块不得被执行,也不得被抓取 ----
+ *
+ * parser 只负责把 type 记在脚本记录上;「算不算脚本」是加载器的策略
+ * (js_engine.c 的 __tb_is_js_script)。此前策略缺失,后果有二:
+ *   - 内容被 eval:结构化数据的 JSON 抛 "expecting ';'",而 <style> 的 CSS 更是
+ *     每个带样式的页面都会拿到一条 "script error: ... is not defined" 假报错;
+ *   - 带 src 的数据块会**真的发起一次网络请求**去抓一个根本不是脚本的 URL。
+ */
+
+/* 结构化数据 + 模板 + importmap:一律不执行,也不产生任何 console 输出。
+ * 此前每一条都会变成一条假报错 —— 真实页面上这是「每页必错」的噪音。 */
+TEST(BrowserApi, DataBlockScriptsAreNotExecuted) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>Data Blocks</title>"
+             "<script type=\"application/ld+json\">{\"@context\":\"https://schema.org\","
+             "\"@type\":\"Article\",1/0:\"boom\"}</script>"
+             "<script type=\"application/json\">{\"a\":1}</script>"
+             "<script type=\"text/template\"><b>hi</b> {{x}}</script>"
+             "<script type=\"importmap\">{\"imports\":{\"a\":\"/a.js\"}}</script>"
+             "<script type=\"text/x-handlebars-template\"><div></div></script>"
+             "<p>body</p>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+  pump_rounds(b, 3, 5);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_STREQ(tb_view_title(v), "Data Blocks");
+  EXPECT_NE(strstr(tb_view_text(v), "body"), nullptr) << tb_view_text(v);
+
+  /* 关键断言:一条 script error 都没有。此前每种数据块各贡献一条假报错。 */
+  for (const auto &l : cc.lines)
+    EXPECT_EQ(l.find("script error"), std::string::npos)
+        << "数据块被当 JS 执行了,产生假报错: " << l;
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* 带 src 的数据块绝不能被抓取 —— 那是一个根本不是脚本的 URL。
+ * 这是本组修复里唯一有「外部副作用」的一条:多余的请求会被第三方看到,
+ * 也会拖慢首屏。用 request_count 卡住。 */
+TEST(BrowserApi, DataBlockWithSrcIsNeverFetched) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>No Fetch</title>"
+             "<script type=\"application/json\" src=\"/not-really-a-script.json\"></script>"
+             "<script type=\"text/template\" src=\"/tpl.html\"></script>"
+             "<p>body</p>"}},
+      {"/not-really-a-script.json", {200, "application/json", "{}"}},
+      {"/tpl.html", {200, "text/html", "<b>x</b>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  /* 只有文档本身那一次请求 */
+  EXPECT_EQ(srv.request_count(), 1)
+      << "数据块的 src 被抓取了(应有且仅有 1 次请求:文档本身)";
+  tb_destroy(b);
+}
+
+/* 真正的脚本仍然照常执行 —— 过滤不能过头。
+ * type 缺失、空、以及带 charset 参数的 JavaScript MIME 类型都算脚本。 */
+TEST(BrowserApi, RealScriptsStillRunAlongsideDataBlocks) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>Runs</title>"
+             "<script type=\"application/ld+json\">{\"a\":1}</script>"
+             "<script>__tb_mark = 'no-type';</script>"
+             "<script type=\"\">__tb_mark += '|empty';</script>"
+             "<script type=\"text/javascript;charset=utf-8\">__tb_mark += '|charset';</script>"
+             "<script type=\"module\">__tb_mark += '|module';</script>"
+             "<p>body</p>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  char *out = nullptr;
+  ASSERT_EQ(tb_eval_js(b, "String(__tb_mark)", &out).code, 0);
+  ASSERT_NE(out, nullptr);
+  EXPECT_STREQ(out, "no-type|empty|charset|module") << out;
+  free(out);
+  tb_destroy(b);
+}
+
+/* <style> 的内容是 CSS 不是 JS,不能被 eval。
+ * 此前每个带 <style> 的页面都会拿到一条 "script error: ... is not defined"。 */
+TEST(BrowserApi, StyleContentIsNotEvaledAsJavaScript) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>Styled</title>"
+             "<style>p{color:red}</style>"
+             "<style>.a{margin:0}</style>"
+             "<p>body</p>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+  pump_rounds(b, 3, 5);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_STREQ(tb_view_title(v), "Styled");
+  for (const auto &l : cc.lines)
+    EXPECT_EQ(l.find("script error"), std::string::npos)
+        << "CSS 被当 JS 求值了: " << l;
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* 数值实体按码点解释:此前 "&#x1F600;" 落在私有区码位 U+F600,
+ * 渲染成一个无意义字形。这条从解析一路走到视图,确认没有中途再被截断。 */
+TEST(BrowserApi, AstralNumericEntitySurvivesToTheView) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>Entities</title>"
+             "<p>star=&#x1F600; euro=&#8364; bmp=&#65;</p>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  const char *txt = tb_view_text(v);
+  EXPECT_NE(strstr(txt, "\xF0\x9F\x98\x80"), nullptr) << "星形码点被截断: " << txt;
+  EXPECT_EQ(strstr(txt, "\xEF\xA0\x80"), nullptr) << "落进私有区 U+F600: " << txt;
+  EXPECT_NE(strstr(txt, "\xE2\x82\xAC"), nullptr) << txt;
+  EXPECT_NE(strstr(txt, "A"), nullptr) << txt;
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* 属性名一律小写 —— dom.js 取值全用小写键,此前 "<a HREF=...>" 的链接是死的。 */
+TEST(BrowserApi, UppercaseAttributesAreLowercased) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>Attrs</title>"
+             "<a HREF='/target' CLASS='big'>link</a>"}},
+      {"/target", {200, "text/html", "<title>Target</title><p>arrived</p>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  ASSERT_STREQ(tb_view_title(v), "Attrs");
+  /* 点击这个链接必须真的能导航 —— 大写 HREF 时它解析成空链接,点击是死路 */
+  struct tb_elem e{};
+  ASSERT_EQ(tb_view_elem(v, 0, &e), 0);
+  ASSERT_STREQ(e.type, "link");
+  ASSERT_STREQ(e.href, "/target");
+  int link_id = e.id;
+  tb_view_free(v);
+  ASSERT_EQ(tb_click(b, link_id).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_STREQ(tb_view_title(v), "Target");
+  EXPECT_NE(strstr(tb_view_text(v), "arrived"), nullptr);
+  tb_view_free(v);
+  tb_destroy(b);
+}
