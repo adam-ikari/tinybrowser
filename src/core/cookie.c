@@ -247,6 +247,24 @@ static char *cookie_path_attr(const char *attr, const char *req_path) {
   return o;
 }
 
+/* cookie 的 name/value 只允许 cookie-octet(RFC 6265 4.1.1):US-ASCII 排除
+ * CTLs(0x00-0x1F)与 0x7F,以及分隔符与空白。
+ *
+ * 这条校验不是洁癖:cookie 值会被我们**自己**拼进 `Cookie:` 请求头。实测
+ * `Set-Cookie: a=x\r\nX-Evil: injected` 会让 jar 原样返回带 CRLF 的头值,于是
+ * 一个能设置 cookie 的源(恶意/被入侵的服务器把用户输入回显进 Set-Cookie
+ * 即可)可以往该域的每个后续请求里注入任意头行。是否真的被拆成多个头取决于
+ * transport 的实现 —— 但**不能把安全性外包给 transport**,换实现就崩。
+ *
+ * 浏览器也是直接拒收这类 cookie,所以丢弃而非清洗:清洗会让 cookie 名不副实。 */
+static int cookie_octet_ok(const char *s) {
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    if (*p <= 0x1F || *p == 0x7F) return 0;
+    if (*p == ' ' || *p == '"' || *p == ',' || *p == ';' || *p == '\\') return 0;
+  }
+  return 1;
+}
+
 /* ---- jar 生命周期 ---- */
 
 tb_cookie_jar *tb_cookie_jar_new(void) {
@@ -289,6 +307,8 @@ void tb_cookie_jar_set(tb_cookie_jar *j, const char *raw, const char *req_url) {
   name = str_trim(name);
   value = str_trim(value);
   if (!*name) { free(nv); return; }     /* 空名 → 丢弃 */
+  /* name/value 含 CTL 或分隔符 → 整条拒收(见 cookie_octet_ok 的说明) */
+  if (!cookie_octet_ok(name) || !cookie_octet_ok(value)) { free(nv); return; }
 
   /* 属性扫描 */
   char *attr_domain = NULL, *attr_path = NULL;
@@ -331,6 +351,12 @@ void tb_cookie_jar_set(tb_cookie_jar *j, const char *raw, const char *req_url) {
   char *dom = cookie_domain_attr(attr_domain, u.host, &host_only);
   if (!dom) {                       /* 非法 domain → 整条丢弃 */
     free(nv); free(attr_domain); free(attr_path);
+    return;
+  }
+  /* 属性值同样要过 cookie-octet:`Domain=a\r\nX: 1` 那类注入不能靠 domain
+   * 后缀检查兜住 —— 它是完全合法的后缀。 */
+  if (!cookie_octet_ok(dom) || (attr_path && !cookie_octet_ok(attr_path))) {
+    free(nv); free(attr_domain); free(attr_path); free(dom);
     return;
   }
   char *pth = cookie_path_attr(attr_path, u.path);

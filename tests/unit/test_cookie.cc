@@ -319,3 +319,76 @@ TEST(Cookie, NonNumericPortFailsClosed) {
   ExpectHeader(j, "http://example.test:abc/", "");
   tb_cookie_jar_free(j);
 }
+
+/* ---- CRLF / 控制字符注入(安全) ----
+ *
+ * cookie 值由**我们自己的代码**拼进 `Cookie:` 请求头。若 name/value 能带
+ * CRLF,一个能设置 cookie 的源(被入侵的服务器把用户输入回显进 Set-Cookie
+ * 即可)就能往该域的每个后续请求注入任意头行。是否真被拆成多行取决于
+ * transport 实现 —— 不能把安全性外包给 transport,换实现就崩。
+ * 浏览器也是直接拒收这类 cookie(RFC 6265 cookie-octet 排除 CTL)。 */
+
+TEST(Cookie, CrLfInValueIsRejected) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  tb_cookie_jar_set(j, "a=x\r\nX-Evil: injected", "http://example.test/");
+  ExpectHeader(j, "http://example.test/", "");     /* 整条拒收,不部分保留 */
+  tb_cookie_jar_free(j);
+}
+
+TEST(Cookie, BareCrOrLfIsRejected) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  tb_cookie_jar_set(j, "a=x\rEvil", "http://example.test/");
+  ExpectHeader(j, "http://example.test/", "");
+  tb_cookie_jar_set(j, "b=x\nEvil", "http://example.test/");
+  ExpectHeader(j, "http://example.test/", "");
+  tb_cookie_jar_free(j);
+}
+
+TEST(Cookie, CrLfInNameIsRejected) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  tb_cookie_jar_set(j, "a\r\nX-Evil: 1=v", "http://example.test/");
+  ExpectHeader(j, "http://example.test/", "");
+  tb_cookie_jar_free(j);
+}
+
+/* Domain 属性值同样要校验:`Domain=a\r\nX: 1` 是完全合法的后缀,
+ * 靠 domain 后缀检查兜不住。 */
+TEST(Cookie, CrLfInDomainAttributeIsRejected) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  tb_cookie_jar_set(j, "a=1; Domain=example.test\r\nX-Evil: 1",
+                    "http://example.test/");
+  ExpectHeader(j, "http://example.test/", "");
+  tb_cookie_jar_free(j);
+}
+
+/* DEL(0x7F)按 cookie-octet 也排除。
+ *
+ * 值里的**嵌入 NUL 测不了**:API 收const char*,NUL 在到达 jar 之前就把字符串
+ * 截断了,jar 看到的与 "a=x" 无异 —— 这是 C 字符串接口的属性,不是 jar 的缺陷。
+ * 所以此处只断言 DEL;NUL 的等价风险(「校验通过但实际更短」)在 strnlen 风格的
+ * 接口下才会出现,当前接口下不可达。 */
+TEST(Cookie, DelIsRejected) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  tb_cookie_jar_set(j, "b=x\x7f", "http://example.test/");
+  EXPECT_EQ(0, tb_cookie_jar_count(j));
+  tb_cookie_jar_free(j);
+}
+
+/* 分隔符与空白按 cookie-octet 也排除(否则拼出的头会有歧义)。 */
+TEST(Cookie, SeparatorsAndSpaceInValueAreRejected) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  tb_cookie_jar_set(j, "a=x y", "http://example.test/");
+  EXPECT_EQ(0, tb_cookie_jar_count(j));
+  tb_cookie_jar_set(j, "b=x,y", "http://example.test/");
+  EXPECT_EQ(0, tb_cookie_jar_count(j));
+  tb_cookie_jar_free(j);
+}
+
+/* 正常 cookie 不受影响 —— 防止上面的校验误伤。 */
+TEST(Cookie, OrdinaryCookieStillWorks) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  tb_cookie_jar_set(j, "sid=YWJjPT0=; Path=/; Domain=example.test",
+                    "https://example.test/");
+  ExpectHeader(j, "https://example.test/x", "sid=YWJjPT0=");
+  tb_cookie_jar_free(j);
+}
