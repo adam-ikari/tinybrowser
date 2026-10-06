@@ -42,31 +42,88 @@ typedef struct {
  * JSON helpers
  * =================================================================== */
 
+/* 从 s[i] 起的 UTF-8 序列长度;0 = 该字节不是合法的序列起始(或序列不完整)。
+ * 按 Unicode 标准表排除过长编码(C0/C1)、代理区(D800-DFFF)与越界(>U+10FFFF)。 */
+static int utf8_seq_len(const unsigned char *s, size_t len, size_t i) {
+  unsigned char c = s[i];
+  size_t avail = len - i;
+  if (c < 0x80) return 1;
+  if (c >= 0xC2 && c <= 0xDF) {
+    if (avail < 2 || (s[i+1] & 0xC0) != 0x80) return 0;
+    return 2;
+  }
+  if (c == 0xE0) {
+    if (avail < 3 || s[i+1] < 0xA0 || s[i+1] > 0xBF) return 0;
+  } else if (c >= 0xE1 && c <= 0xEC) {
+    if (avail < 3 || (s[i+1] & 0xC0) != 0x80) return 0;
+  } else if (c == 0xED) {
+    if (avail < 3 || s[i+1] < 0x80 || s[i+1] > 0x9F) return 0;   /* 排除代理 */
+  } else if (c == 0xEE || c == 0xEF) {
+    if (avail < 3 || (s[i+1] & 0xC0) != 0x80) return 0;
+  } else if (c == 0xF0) {
+    if (avail < 4 || s[i+1] < 0x90 || s[i+1] > 0xBF) return 0;
+  } else if (c >= 0xF1 && c <= 0xF3) {
+    if (avail < 4 || (s[i+1] & 0xC0) != 0x80) return 0;
+  } else if (c == 0xF4) {
+    if (avail < 4 || s[i+1] < 0x80 || s[i+1] > 0x8F) return 0;   /* 排除 >U+10FFFF */
+  } else {
+    return 0;   /* 0x80-0xBF 游离续字节、0xC0/0xC1 过长、0xF5-0xFF 越界 */
+  }
+  /* 后续字节必须是续字节(0x80-0xBF) */
+  for (size_t k = i + 2; k < i + (size_t)(c < 0xE0 ? 2 : (c < 0xF0 ? 3 : 4)); k++)
+    if ((s[k] & 0xC0) != 0x80) return 0;
+  return (c < 0xE0) ? 2 : (c < 0xF0) ? 3 : 4;
+}
+
 /* 把任意字节转成可嵌入 JSON 字符串字面量的转义形式(不含外层引号)。
- * 控制字符走 \u00XX,UTF-8 多字节序列原样透传(合法 JSON)。 */
+ * 控制字符走 \u00XX。
+ *
+ * **非法 UTF-8 序列替换成 U+FFFD(EF BF BD)。** 这不是可选的健壮性优化,而是
+ * 必需:本函数的产物会被拼进 JS 源码的字符串字面量再交给 qzjs 求值,而
+ * 非法 UTF-8 会让**整个 eval 失败**。实测一段带截断多字节序列的 HTML
+ * ("<p>\xE4\xB8</p>")会让 load_document 直接返回 -1 —— 一个坏字节毁掉整页,
+ * 页面连正文都渲染不出来。而坏字节在真实场景里很常见:截断的下载、
+ * charset 声明与实际不符、GBK/Latin-1 页面被当 UTF-8 处理。
+ * 替换成 U+FFFD 正是浏览器的做法(TextDecoder 的 replacement 行为)。 */
 static char *json_escape(const char *s, size_t len) {
   static const char hex[] = "0123456789abcdef";
-  /* 最坏情况:每个字节都成 \u00XX(6 字节) */
-  char *out = (char *)malloc(len * 6 + 1);
+  static const char REPL[] = "\xEF\xBF\xBD";          /* U+FFFD */
+  /* 最坏情况:每字节 3 字节替换字符,或 6 字节 \u00XX(控制字符)—— 取 6。
+     两者不会同时发生,6 已是上界。 */
+  char *out = (char *)malloc(len * 6 + 4);
   if (!out) return NULL;
   size_t o = 0;
-  for (size_t i = 0; i < len; i++) {
+  for (size_t i = 0; i < len; ) {
     unsigned char c = (unsigned char)s[i];
     switch (c) {
-      case '"':  out[o++] = '\\'; out[o++] = '"';  break;
-      case '\\': out[o++] = '\\'; out[o++] = '\\'; break;
-      case '\b': out[o++] = '\\'; out[o++] = 'b';  break;
-      case '\f': out[o++] = '\\'; out[o++] = 'f';  break;
-      case '\n': out[o++] = '\\'; out[o++] = 'n';  break;
-      case '\r': out[o++] = '\\'; out[o++] = 'r';  break;
-      case '\t': out[o++] = '\\'; out[o++] = 't';  break;
-      default:
-        if (c < 0x20) {
-          out[o++] = '\\'; out[o++] = 'u'; out[o++] = '0'; out[o++] = '0';
-          out[o++] = hex[(c >> 4) & 0xF]; out[o++] = hex[c & 0xF];
-        } else {
-          out[o++] = (char)c;
-        }
+      case '"':  out[o++] = '\\'; out[o++] = '"';  i++; continue;
+      case '\\': out[o++] = '\\'; out[o++] = '\\'; i++; continue;
+      case '\b': out[o++] = '\\'; out[o++] = 'b';  i++; continue;
+      case '\f': out[o++] = '\\'; out[o++] = 'f';  i++; continue;
+      case '\n': out[o++] = '\\'; out[o++] = 'n';  i++; continue;
+      case '\r': out[o++] = '\\'; out[o++] = 'r';  i++; continue;
+      case '\t': out[o++] = '\\'; out[o++] = 't';  i++; continue;
+      default: break;
+    }
+    if (c < 0x20) {                                  /* 其余 C0 控制字符 */
+      out[o++] = '\\'; out[o++] = 'u'; out[o++] = '0'; out[o++] = '0';
+      out[o++] = hex[(c >> 4) & 0xF]; out[o++] = hex[c & 0xF];
+      i++;
+      continue;
+    }
+    if (c < 0x80) { out[o++] = (char)c; i++; continue; }
+
+    int seq = utf8_seq_len((const unsigned char *)s, len, i);
+    if (seq > 0) {
+      memcpy(out + o, s + i, (size_t)seq);
+      o += (size_t)seq;
+      i += (size_t)seq;
+    } else {
+      /* 非法序列:吐一个 U+FFFD,**只前进 1 字节** —— 前进整个「猜测长度」会
+       * 把后续合法字节一起吞掉,扩大损坏面。 */
+      memcpy(out + o, REPL, 3);
+      o += 3;
+      i++;
     }
   }
   out[o] = '\0';

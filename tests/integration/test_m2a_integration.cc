@@ -731,3 +731,97 @@ TEST(BrowserApi, NotRenderableViewCarriesStatusAndUrl) {
   tb_view_free(v);
   tb_destroy(b);
 }
+
+/* ---- 坏 UTF-8 不得毁掉整页 ----
+ *
+ * 文档正文是被拼进 JS 源码的字符串字面量交给 qzjs 求值的,而**非法 UTF-8 会让
+ * 整个 eval 失败**。实测一个截断的多字节序列就让 load_document 直接返回 -1 ——
+ * 一个坏字节,整页连正文都渲染不出来。
+ * 坏字节在真实场景里很常见:下载被截断、charset 声明与实际不符、
+ * GBK/Latin-1 页面被当 UTF-8 处理。浏览器的做法是把非法序列替换成 U+FFFD。 */
+
+TEST(BrowserApi, TruncatedUtf8DoesNotKillThePage) {
+  HttpServer srv({
+      // 正文里嵌一个截断的 3 字节序列(E4 B8 缺第三个字节)
+      {"/", {200, "text/html",
+             "<title>Bad UTF8</title><body><p>before</p>"
+             "<p>\xE4\xB8</p><p>after</p></body>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_STREQ(tb_view_title(v), "Bad UTF8");
+  /* 关键:坏字节前后的正常内容都还在,而不是整页空白 */
+  EXPECT_NE(strstr(tb_view_text(v), "before"), nullptr) << tb_view_text(v);
+  EXPECT_NE(strstr(tb_view_text(v), "after"), nullptr) << tb_view_text(v);
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* 完全非法的字节序列、以及会让 JS 字符串语义混乱的编码,都必须被替换而非
+ * 让整页失败:过长编码(C0/C1)、代理区(D800-DFFF,JS 字符串里非法)、
+ * 越界(> U+10FFFF)、游离续字节。 */
+TEST(BrowserApi, StructurallyInvalidUtf8IsReplacedNotFatal) {
+  struct Case { const char *name; const char *html; };
+  const Case cases[] = {
+    {"游离续字节",   "<title>T</title><p>a\x80\x80" "b</p>"},
+    {"过长编码 C0",  "<title>T</title><p>a\xC0\xAF" "b</p>"},
+    {"过长编码 C1",  "<title>T</title><p>a\xC1\xBF" "b</p>"},
+    {"代理区高字节", "<title>T</title><p>a\xED\xA0\x80" "b</p>"},
+    {"代理区低字节", "<title>T</title><p>a\xED\xBF\xBF" "b</p>"},
+    {"越界 F4 90",  "<title>T</title><p>a\xF4\x90\x80\x80" "b</p>"},
+    {"非法 F5-FF",   "<title>T</title><p>a\xF5\x80\x80\x80" "b</p>"},
+    {"纯 0xFF",      "<title>T</title><p>a\xFF" "b</p>"},
+  };
+  for (const auto &c : cases) {
+    HttpServer srv({{"/", {200, "text/html", c.html}}});
+    ConsoleCapture cc;
+    tb_browser *b = make_browser(&cc);
+    ASSERT_NE(b, nullptr) << c.name;
+    ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0) << c.name;
+    ASSERT_EQ(tb_wait_idle(b, 5000), 0) << c.name;
+    tb_view *v = nullptr;
+    ASSERT_EQ(tb_observe(b, &v).code, 0) << c.name;
+    EXPECT_STREQ(tb_view_title(v), "T") << c.name;
+    /* 坏字节只毁掉自己那一段,前后文必须完好 */
+    EXPECT_NE(strstr(tb_view_text(v), "a"), nullptr) << c.name << ": " << tb_view_text(v);
+    EXPECT_NE(strstr(tb_view_text(v), "b"), nullptr) << c.name << ": " << tb_view_text(v);
+    tb_view_free(v);
+    tb_destroy(b);
+  }
+}
+
+/* 合法 UTF-8 必须逐字节透传,不能被替换机制误伤 —— 这是本修复最大的风险:
+ * 替换逻辑一旦写错,所有非 ASCII 页面都会变成一片 U+FFFD。 */
+TEST(BrowserApi, ValidUtf8PassesThroughUnchanged) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>\xE4\xB8\xAD\xE6\x96\x87\xE6\xB5\x8B\xE8\xAF\x95</title>"
+             "<p>\xE4\xB8\xAD\xE6\x96\x87 \xE6\xB5\x8B\xE8\xAF\x95 "
+             "\xF0\x9F\x98\x80 \xE2\x82\xAC \xF0\xA0\x80\x80</p>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  /* 2/3/4 字节序列全部原样到达 */
+  EXPECT_STREQ(tb_view_title(v), "\xE4\xB8\xAD\xE6\x96\x87\xE6\xB5\x8B\xE8\xAF\x95");
+  const char *txt = tb_view_text(v);
+  EXPECT_NE(strstr(txt, "\xE4\xB8\xAD\xE6\x96\x87"), nullptr) << txt;   /* 3 字节 */
+  EXPECT_NE(strstr(txt, "\xF0\x9F\x98\x80"), nullptr) << txt;         /* 4 字节 emoji */
+  EXPECT_NE(strstr(txt, "\xE2\x82\xAC"), nullptr) << txt;               /* 3 字节 € */
+  EXPECT_EQ(strstr(txt, "\xEF\xBF\xBD"), nullptr) << "合法 UTF-8 被误替换成 U+FFFD: " << txt;
+  tb_view_free(v);
+  tb_destroy(b);
+}
