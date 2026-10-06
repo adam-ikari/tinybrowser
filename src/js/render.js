@@ -1,6 +1,9 @@
-// 渲染:DOM 树 → {text, title, url, status, elems}。语义与 M1 src/core/render.c 逐字节一致。
-// 对照:push()(render.c 15-33)、add_elem()(63-85)、walk()(98-142)、
-//       extract_title()(144-157, M2a 改整树找首 title)、tb_render() off 钳制(172-188)。
+// 渲染:DOM 树 → {text, title, url, status, elems}。
+//
+// 本文件曾逐行对照 src/core/render.c(M1 的 C 版渲染器)编写。那套代码在 M2a
+// 迁移到 qzjs 引擎后已彻底死掉并被删除 —— 继续保留对它的行号引用会失效,
+// 也会让人以为「改 render.c 就能改行为」。故此处只保留**语义**说明,
+// 不再指向任何文件。行为规格由 tests/goldens/ 下的 golden 逐字节钉住。
 // 约束:所有树遍历均为显式栈迭代(QuickJS 栈深受限,禁递归)。
 
 var _tb_block = { p:1, div:1, h1:1, h2:1, h3:1, h4:1, h5:1, h6:1, li:1, ul:1, ol:1,
@@ -9,18 +12,18 @@ var _tb_block = { p:1, div:1, h1:1, h2:1, h3:1, h4:1, h5:1, h6:1, li:1, ul:1, ol
 var _tb_skip = { script:1, style:1, noscript:1, head:1 };
 
 // 视图 id(计数器) → 节点 映射。render 输出 M1 式 id——只给记录的
-// link/form/input/button/select 按 walk 序从 1 连续编号(镜像 dom.c tb_dom_id),
+// link/form/input/button/select 按 walk 序从 1 连续编号,
 // 而非 parser 的 n.id(所有元素都编号)。此映射供 _tb_elem_info/_tb_form_info
 // 把视图 id 解析回节点(方案A:golden 逐字节不变 + 交互 id 与 M1 一致)。
 var __tb_view_nodes = {};
 
 function tb_render_js(doc, url, status) {
   var c = { text: "", title: "", elems: [], url: url || "", status: status };
-  var nextId = 0;                // M1 tb_dom_id 计数器:仅记录的元素递增
+  var nextId = 0;                // 视图 id 计数器:仅记录的元素递增
   __tb_view_nodes = {};          // 每渲染一张视图重建映射
-  var at_line_start = true;      // render.c ctx.at_line_start:行首空白不追加
+  var at_line_start = true;      // 行首空白不追加
 
-  // push:逐字镜像 render.c:15-33。不折叠连续换行;\r 走 else 分支原样追加。
+  // push:按字符逐个处理。不折叠连续换行;\r 走 else 分支原样追加。
   function push(s) {
     for (var k = 0; k < s.length; k++) {
       var ch = s[k];
@@ -42,8 +45,8 @@ function tb_render_js(doc, url, status) {
   }
   function newline() { push("\n"); }
 
-  // add_elem:镜像 render.c:63-85。href/name/value 全部从 attrs 同名取。
-  // id 用计数器而非 n.id:与 M1 tb_dom_id 一致(记录序从 1 连续),golden 逐字节不变。
+  // add_elem:href/name/value 全部从 attrs 同名取。
+  // id 用计数器而非 n.id —— 记录序从 1 连续,golden 逐字节钉住这个编号规则。
   function addElem(type, n) {
     var e = { id: ++nextId, type: type, text: "", href: n.attrs.href || "",
               name: n.attrs.name || "", value: n.attrs.value || "",
@@ -65,7 +68,7 @@ function tb_render_js(doc, url, status) {
   }
   function isBlock(tag) { return _tb_block[tag] ? true : false; }
 
-  // walk:镜像 render.c:98-142。显式栈帧 {n, phase, savedSel}。
+  // walk:显式栈帧 {n, phase, savedSel}。禁递归(QuickJS 栈深受限)。
   // phase 0=进入(dispatch + block-before + 逆序压子),1=退出(block-after + 恢复 curSel)。
   // curSel = 当前 select 的 elem 下标(非节点 id);-1 = 不在 select 内。
   var curSel = -1;
@@ -115,7 +118,7 @@ function tb_render_js(doc, url, status) {
     }
   }
 
-  // off 钳制 + 首尾裁行:镜像 render.c:172-188。仅当 start>0(前导换行被裁)时执行。
+  // off 钳制 + 首尾裁行。仅当 start>0(前导换行被裁)时执行。
   var t = c.text;
   var start = 0;
   while (t[start] === "\n") start++;
@@ -130,8 +133,8 @@ function tb_render_js(doc, url, status) {
     }
   }
 
-  // title:文档序第一个 <title> 的首子文本。render.c extract_title(144-157) 在 head 下找;
-  // M2a 解析器不自动包 head,故改整树显式栈查找(等价于"文档序第一个 title")。
+  // title:文档序第一个 <title> 的首子文本。
+  // 解析器不自动包 head,故用整树显式栈查找(等价于"文档序第一个 title")。
   var tstack = [doc];
   while (tstack.length) {
     var tn = tstack.pop();

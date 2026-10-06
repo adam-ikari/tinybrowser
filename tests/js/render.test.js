@@ -94,7 +94,7 @@ t("option text not in body", function () {
 
 t("elems id consecutive from 1 over recorded only (M1 counter parity)", function () {
   var r = R("<p>skip</p><a href='/a'>A</a><br><button>Go</button><input name='q'>");
-  // 非记录元素(p/br/文本)不占号;link=1, button=2, input=3 —— 与 M1 tb_dom_id 一致
+  // 非记录元素(p/br/文本)不占号;link=1, button=2, input=3 —— 视图 id 计数器规则
   eq(r.elems.length, 3);
   eq(r.elems[0].id, 1);
   eq(r.elems[0].type, "link");

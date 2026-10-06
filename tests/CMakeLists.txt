@@ -38,16 +38,6 @@ target_include_directories(test_url PRIVATE ${TB_TEST_INCS})
 target_link_libraries(test_url PRIVATE tinybrowser gtest_main)
 gtest_discover_tests(test_url)
 
-add_executable(test_dom unit/test_dom.cc)
-target_include_directories(test_dom PRIVATE ${TB_TEST_INCS})
-target_link_libraries(test_dom PRIVATE tinybrowser gtest_main)
-gtest_discover_tests(test_dom)
-
-add_executable(test_render unit/test_render.cc)
-target_include_directories(test_render PRIVATE ${TB_TEST_INCS})
-target_link_libraries(test_render PRIVATE tinybrowser gtest_main)
-gtest_discover_tests(test_render)
-
 add_executable(test_session unit/test_session.cc harness/fakes.c)
 target_include_directories(test_session PRIVATE ${TB_TEST_INCS})
 target_link_libraries(test_session PRIVATE tinybrowser gtest_main)
@@ -81,14 +71,6 @@ add_executable(golden_runner goldens/golden_runner.cc)
 target_include_directories(golden_runner PRIVATE ${TB_TEST_INCS})
 target_link_libraries(golden_runner PRIVATE tinybrowser qjs gtest_main)
 add_test(NAME golden COMMAND golden_runner ${CMAKE_SOURCE_DIR}/)
-
-add_executable(test_render_coord unit/test_render_coord.cc)
-target_include_directories(test_render_coord PRIVATE ${TB_TEST_INCS})
-# 注意:此处用 ${CMAKE_SOURCE_DIR}/ 而非 ${CMAKE_CURRENT_SOURCE_DIR}/ —
-# 测试代码按 repo 根拼接 "tests/goldens/fixtures/",与 golden_runner 的前缀约定一致。
-target_compile_definitions(test_render_coord PRIVATE TB_TEST_SRC_DIR="${CMAKE_SOURCE_DIR}/")
-target_link_libraries(test_render_coord PRIVATE tinybrowser gtest_main)
-gtest_discover_tests(test_render_coord)
 
 add_executable(test_hint unit/test_hint.cc)
 target_include_directories(test_hint PRIVATE ${TB_TEST_INCS})

@@ -111,9 +111,7 @@ add_library(tinybrowser STATIC
   src/core/clock.c
   src/core/content.c
   src/core/url.c
-  src/core/dom.c
   src/core/view.c
-  src/core/render.c
   src/core/hint.c
   src/core/session.c
   src/core/cookie.c
