@@ -254,3 +254,68 @@ TEST(Cookie, RepeatedAttributeLastWins) {
   ExpectHeader(j, "http://example.test/other", "");
   tb_cookie_jar_free(j);
 }
+
+/* ---- 端口:domain 匹配不看端口(RFC 6265) ----
+ *
+ * 这些用例盯的是一个具体的回归:url_split 曾把 "localhost:8080" 整个当成 host,
+ * 于是
+ *   1. 带 Domain= 的 cookie 只要 URL 带端口就整条被丢弃(开发服务器上
+ *      Domain= 全部设不进去,且无任何错误提示);
+ *   2. 同 host 不同端口之间不命中。
+ * host-only 当时"能用"是巧合 —— 端口被嵌进 domain 字符串、两边恰好相等。 */
+
+TEST(Cookie, DomainAttributeWorksWhenUrlHasPort) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  /* 设的时候就能读到,不能是空 */
+  tb_cookie_jar_set(j, "s=1; Domain=localhost", "http://localhost:8080/");
+  ExpectHeader(j, "http://localhost:8080/", "s=1");
+  tb_cookie_jar_free(j);
+}
+
+TEST(Cookie, DomainMatchIgnoresPort) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  tb_cookie_jar_set(j, "s=1; Domain=localhost", "http://localhost:8080/");
+  ExpectHeader(j, "http://localhost:9090/", "s=1");   /* 跨端口应命中 */
+  ExpectHeader(j, "https://localhost/", "s=1");      /* 跨协议仍命中 */
+  ExpectHeader(j, "http://example.test/", "");        /* 别的 host 不命中 */
+  tb_cookie_jar_free(j);
+}
+
+TEST(Cookie, HostOnlyCookieSpansPorts) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  tb_cookie_jar_set(j, "s=1", "http://127.0.0.1:8080/");
+  /* cookie 不按端口隔离,故 host-only 也应跨端口 */
+  ExpectHeader(j, "http://127.0.0.1:9090/x", "s=1");
+  ExpectHeader(j, "http://127.0.0.2:8080/", "");      /* 换 IP 就不命中 */
+  tb_cookie_jar_free(j);
+}
+
+TEST(Cookie, IpLiteralHostWithPort) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  tb_cookie_jar_set(j, "s=1; Domain=127.0.0.1", "http://127.0.0.1:8080/");
+  ExpectHeader(j, "http://127.0.0.1:9090/", "s=1");
+  tb_cookie_jar_free(j);
+}
+
+/* IPv6 字面量:方括号内的冒号不能当端口剥掉。 */
+TEST(Cookie, IPv6LiteralHostKeepsBrackets) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  tb_cookie_jar_set(j, "s=1; Domain=[::1]", "http://[::1]:8080/");
+  ExpectHeader(j, "http://[::1]:8080/", "s=1");
+  ExpectHeader(j, "http://[::1]:9090/", "s=1");       /* 跨端口 */
+  ExpectHeader(j, "http://127.0.0.1:8080/", "");      /* 不同 host 不命中 */
+  tb_cookie_jar_free(j);
+}
+
+/* 端口段非数字时**不得**剥,否则会把 host 截坏(把 example.test:abc 变成
+ * example.test,等于让 cookie 发往一个不同的 host)。
+ * 正确取向是 fail closed:host 保持 "example.test:abc",与 example.test 不匹配,
+ * 结果是 cookie 不发送 —— 宁可不发,也不误发。 */
+TEST(Cookie, NonNumericPortFailsClosed) {
+  tb_cookie_jar *j = tb_cookie_jar_new();
+  tb_cookie_jar_set(j, "s=1", "http://example.test/");
+  ExpectHeader(j, "http://example.test/x", "s=1");
+  /* 合法 URL 不会出现这种端口;真出现时按 fail closed 处理 */
+  ExpectHeader(j, "http://example.test:abc/", "");
+  tb_cookie_jar_free(j);
+}

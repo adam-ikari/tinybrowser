@@ -119,6 +119,40 @@ static int attr_is(const char *name, const char *want) {
 
 typedef struct { char scheme[16]; char host[256]; char path[512]; } url_parts;
 
+/* 剥掉 host 里的端口。
+ *
+ * RFC 6265 的 domain 匹配**不看端口**,cookie 本身也没有端口属性(同一 host 的
+ * 不同端口共享 cookie)。此前 url_split 把 "localhost:8080" 整个塞进 host,
+ * 后果有两个,都很实际:
+ *   1. **任何带 Domain= 属性的 cookie,只要 URL 带端口就整条被丢弃** ——
+ *      cookie_domain_attr 要求 domain 是请求 host 的后缀,而 "localhost" 不是
+ *      "localhost:8080" 的后缀 → 返回 NULL → 整条拒绝。开发服务器(任意非默认
+ *      端口)上的 Domain= cookie 全部设不进去,且无任何错误提示。
+ *   2. 同 host 不同端口之间 cookie 不命中。
+ * host-only 看起来"能用"是巧合:端口被嵌进 domain 字符串,两边恰好相等。
+ *
+ * IPv6 字面量("[::1]:8080")的冒号在方括号内,不能剥。 */
+static void strip_port(char *host) {
+  size_t n = strlen(host);
+  const char *rb = strchr(host, ']');
+  /* 端口只可能出现在 ']' 之后;无方括号时从字符串开头起算。
+     (不能用 strcspn(host,"]") 当上界 —— 没有 ']' 时它返回字符串长度,
+     会让循环条件永不成立,整个函数静默失效。) */
+  size_t limit = rb ? (size_t)(rb - host) + 1 : 0;
+  /* 裸 IPv6(无方括号)含多个冒号,不能按「最后一个冒号」剥 —— 那种 host 在
+     合法 URL 里一定带方括号,这里遇到就整体不动,宁可漏剥不可剥坏。 */
+  if (!rb && strchr(host, ':') != strrchr(host, ':')) return;
+
+  for (size_t i = n; i > limit; i--) {
+    if (host[i - 1] != ':') continue;
+    int all_digits = 1;
+    for (size_t k = i; k < n; k++)
+      if (!isdigit((unsigned char)host[k])) { all_digits = 0; break; }
+    if (all_digits) host[i - 1] = '\0';
+    return;   /* 只处理最后一个冒号:其后的内容不是纯数字就不剥 */
+  }
+}
+
 static int url_split(const char *url, url_parts *out) {
   if (!url) return 0;
   memset(out, 0, sizeof *out);
@@ -135,6 +169,7 @@ static int url_split(const char *url, url_parts *out) {
   if (hl == 0 || hl >= sizeof out->host) return 0;
   memcpy(out->host, host, hl);
   out->host[hl] = '\0';
+  strip_port(out->host);
   to_lower(out->host);
   if (*hend == '/') {
     size_t pl = strcspn(hend, "?#");
