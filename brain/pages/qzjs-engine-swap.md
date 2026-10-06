@@ -5,13 +5,13 @@ category: decision
 status: active
 tags: [js, qzjs, quickjs, engine, submodule]
 created: "2026-10-04T14:05:26"
-updated: "2026-10-06T00:19:31"
+updated: "2026-10-06T00:41:47"
 ---
 
 <!-- compiled_truth -->
 # JS 引擎迁移到 qzjs（qzjs-engine-swap）
 
-## 结论:已落地并全绿(84/84;ASAN+UBSAN+leak 全新构建 84/84 零泄漏)
+## 结论:已落地并全绿(122/122;ASAN+UBSAN+leak 全新构建 122/122 零泄漏)
 
 ## 定位:qzjs 不是 QuickJS 的 drop-in,而是「邮箱 + 事件循环」运行时
 - `adam-ikari/qzjs` = *Embeddable QuickJS-ng runtime with PAL*。JS 跑在**库自有线程 + 自有 uv loop** 上。
@@ -30,9 +30,15 @@ updated: "2026-10-06T00:19:31"
 - ⚠️ **`deps/qzjs/deps/mbedtls` 还有第三层嵌套子模块 `framework`(mbedtls-framework),
   必须初始化**,否则 mbedTLS 的 CMake config 步骤报
   "framework/CMakeLists.txt not found … Run: git submodule update --init"。
-- ⚠️ **指针不指向 qzjs master**:qzjs PR #1(修 https fetch + `qz_destroy` 崩溃,已 rebase 到
-  `c1425f9`)尚未合入 master。指向 master 会让 https fetch 全部失败、`qz_destroy` 崩溃回归。
-  等 PR #1 合并后再切。
+- ✅ **指针已切到 qzjs master(`478e6e7`,2026-10-06)**。PR #1/#2/#3 均已合并,「等 PR #1
+  合并后再切」的条件已满足。此前"指向 master 会让 https fetch 全部失败、qz_destroy
+  崩溃回归"的顾虑已不适用。
+  ⚠️ 切换时的一个反直觉现象:**qzjs 走 squash merge**(见其 #3 定的分支规范),故
+  PR #1 的 5 个提交被压成一条 `896539c`,我们之前跟踪的 `ab55d71` **不是 master 的
+  祖先**。这不是改动丢失 —— squash 的正常结果。**核对办法是逐项查内容,不能只看 SHA**:
+  `rt->http_ops = op` / `op->cb` 的 CANCELLED 分支 / 诊断串 / read idle timeout 四处,
+  以及 `test/test_http_inflight_teardown_gtest.cpp` 都在 master 的树里。
+  代价正是我在其 PR #3 评审里预警过的:commit message 里的论证不进 master。
 - ⚠️ **`/home/gem/project/qzos/qzjs` 是同一上游的另一份 checkout**,它的本地提交(`1d438237`
   等)多半**未推送到 GitHub** —— `git branch -r --contains <sha>` 在该 checkout 里查不到任何
   远程分支。**以 GitHub master 为准,不要拿本地那份当基准**,否则会把只存在于本地的改动
@@ -317,4 +323,10 @@ create→导航(含子资源抓取)→destroy,并断言外部脚本的全局变�
   kind: reversal
   summary: "推翻「cookie jar 缺 public suffix 列表 ⇒ Domain=com 跨站泄漏防不住」这条我此前写下的判断:实测不成立。cookie_domain_attr 已要求 domain 是请求 host 的后缀,evil.test 声明 Domain=com 会被拒,cookie 不会发往 bank.com。真正缺的只是「拒绝裸 TLD」(仅当请求 host 本身就是 com 时才被接受)。教训:凭「少了 X 机制 ⇒ 攻击 Y 成立」的推理写下结论,没实测"
   source: "写探针实测 evil.test 设 Domain=com 后是否发往 bank.com/victim.com"
+  affects: [qzjs-engine-swap]
+
+- time: 2026-10-06T00:41:47
+  kind: decision
+  summary: "指针已切到 qzjs master(PR #1/#2/#3 全部合并);记录 squash merge 导致旧 SHA 非 master 祖先这个反直觉现象及核对办法"
+  source: "commit 7690f12;全新 build 122/122、ASAN 零泄漏"
   affects: [qzjs-engine-swap]
