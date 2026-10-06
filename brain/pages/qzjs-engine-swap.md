@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [js, qzjs, quickjs, engine, submodule]
 created: "2026-10-04T14:05:26"
-updated: "2026-10-05T23:46:12"
+updated: "2026-10-06T00:19:31"
 ---
 
 <!-- compiled_truth -->
@@ -194,9 +194,18 @@ create→导航(含子资源抓取)→destroy,并断言外部脚本的全局变�
 - ✅ `tb_pump` 现在会排空 JS 邮箱 —— 此前**从不**调 `poll_timers`,而邮箱是 qzjs 唯一的
   出站通道,等于 console 帧堆积且 `location.href=…` 的导航指令永远没人执行。
 - ✅ 定时器改 DOM 后视图自动刷新(JS 侧 DOM 指纹比对,变了才重渲)。
-- cookie jar **刻意不做**的部分(已知缺口,非遗漏):无 public suffix 列表
-  (eTLD+1 判断缺席,`Domain=com` 这类跨站泄漏防不住)、无 SameSite、不持久化。
-  「看起来对但语义错」比不做更危险,故在 `cookie.h` 里写明。
+- cookie jar **刻意不做**的部分(已知缺口,非遗漏):无完整 public suffix 列表、
+  无 SameSite、不持久化。「看起来对但语义错」比不做更危险,故在 `cookie.h` 里写明。
+  ⚠️ 更正此前一处**过重**的表述:曾写「`Domain=com` 这类跨站泄漏防不住」——
+  实测**不成立**,`cookie_domain_attr` 要求 domain 是请求 host 的后缀,故
+  evil.test 声明 Domain=com 会被拒,cookie 不会发往 bank.com。真正缺的是
+  「拒绝裸 TLD」这一条(仅当请求 host 本身就是 com 时才被接受)。
+- ⚠️ **cookie 的 domain 匹配不看端口**(RFC 6265,cookie 无端口属性)。实现时踩过:
+  host 里留着 `:8080` 会让**任何显式 `Domain=` 的 cookie 在非默认端口上整条丢弃**
+  (开发服务器上 Domain= 全部设不进去且无提示)。host-only 当时"能用"是巧合 ——
+  端口嵌在 domain 字符串里、两边恰好相等。已在 `url_split` 里剥端口。
+  剥的时候要处理 IPv6 方括号(`[::1]:8080` 的方括号内冒号不是端口)与
+  「端口段非数字 ⇒ fail closed」,细节见 `cookie.c` 的 strip_port。
 - ⚠️ **qzjs 不回调宿主 ⇒「宿主函数」不可用**。读侧(location.href / UA / cookie)靠宿主
   在导航提交前 `op:"eval"` 推给 `__tb_env`(无往返开销);写侧(location.href= / back / 
   document.cookie=)靠 JS `postMessage` 进邮箱、宿主 `poll_timers` 时取出执行。
@@ -296,4 +305,16 @@ create→导航(含子资源抓取)→destroy,并断言外部脚本的全局变�
   kind: reversal
   summary: "推翻「遗留只是 console 帧堆积 + 定时器需手动重渲」:真正的大头是 tb_pump 从不调 poll_timers。qzjs 从不回调宿主,邮箱是它唯一出站通道,不排它等于把 JS 的对外输出全堵死 —— console 堆积只是症状,location.href= 发出的导航指令永远没人执行才是要害"
   source: "实现 location 写侧时实测发现指令无人消费"
+  affects: [qzjs-engine-swap]
+
+- time: 2026-10-06T00:19:24
+  kind: decision
+  summary: "修正 cookie public-suffix 那条过重表述(跨站泄漏实际已被 domain 后缀检查挡住),并记下「cookie domain 匹配不看端口」这个实现陷阱"
+  source: "commit f49b3e5;实测验证 Domain=com 跨站攻击不成立"
+  affects: [qzjs-engine-swap]
+
+- time: 2026-10-06T00:19:31
+  kind: reversal
+  summary: "推翻「cookie jar 缺 public suffix 列表 ⇒ Domain=com 跨站泄漏防不住」这条我此前写下的判断:实测不成立。cookie_domain_attr 已要求 domain 是请求 host 的后缀,evil.test 声明 Domain=com 会被拒,cookie 不会发往 bank.com。真正缺的只是「拒绝裸 TLD」(仅当请求 host 本身就是 com 时才被接受)。教训:凭「少了 X 机制 ⇒ 攻击 Y 成立」的推理写下结论,没实测"
+  source: "写探针实测 evil.test 设 Domain=com 后是否发往 bank.com/victim.com"
   affects: [qzjs-engine-swap]
