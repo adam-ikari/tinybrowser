@@ -92,10 +92,30 @@ static int curl_timer_cb(CURLM *m, long timeout_ms, void *userp) {
   return 0;
 }
 
+/* 在 header 值里找**完整 token**(非子串)。
+ *
+ * 原实现是纯子串匹配,于是
+ *   Content-Disposition: inline; filename="my-attachment-file.html"
+ * 会因为 filename 里含 "attachment" 而被误判成附件 ——
+ * 端到端测试 BrowserApi.AttachmentTokenIsNotMatchedAsSubstring 抓到。
+ * 按 RFC 6266,disposition-type 是值里的第一个 token,必须整体匹配。
+ * token 边界:串首/串尾,或前后是分隔符(空白与 , ; =)。 */
 static int header_has_token(const char *v, size_t vlen, const char *tok) {
   size_t tl = strlen(tok);
-  for (size_t i = 0; i + tl <= vlen; i++)
-    if (strncasecmp(v + i, tok, tl) == 0) return 1;
+  for (size_t i = 0; i + tl <= vlen; i++) {
+    if (strncasecmp(v + i, tok, tl) != 0) continue;
+    /* 左边界 */
+    if (i > 0) {
+      char c = v[i - 1];
+      if (c != ' ' && c != '\t' && c != ',' && c != ';' && c != '=') continue;
+    }
+    /* 右边界 */
+    if (i + tl < vlen) {
+      char c = v[i + tl];
+      if (c != ' ' && c != '\t' && c != ',' && c != ';' && c != '=') continue;
+    }
+    return 1;
+  }
   return 0;
 }
 
@@ -121,7 +141,12 @@ static size_t header_cb(char *buf, size_t sz, size_t n, void *ud) {
     free(op->ct);
     op->ct = (char *)malloc(vlen + 1);
     memcpy(op->ct, v, vlen); op->ct[vlen] = '\0';
-  } else if (nl == 20 && strncasecmp(line, "content-disposition", 20) == 0) {
+  } else if (nl == 19 && strncasecmp(line, "content-disposition", 19) == 0) {
+    /* 19 不是 20:"content-disposition" 是 19 个字符。此前写成 20,于是这条
+     * 分支**永远不成立** —— Content-Disposition 从未被检出过,带
+     * attachment 的下载被当成普通页面渲染(端到端测试
+     * BrowserApi.ContentDispositionAttachmentIsNotRendered 抓到)。
+     * 同族的 "content-type"(12)与 "set-cookie"(10)长度是对的,只有这条错。 */
     if (header_has_token(v, vlen, "attachment")) op->attachment = 1;
   } else if (nl == 10 && strncasecmp(line, "set-cookie", 10) == 0 &&
              op->req.on_set_cookie) {

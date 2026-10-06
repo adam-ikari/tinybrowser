@@ -630,3 +630,104 @@ TEST(M2aIntegration, RepeatedSubresourceLoadsDoNotCorruptTransport) {
 
   tb_destroy(b);
 }
+/* ---- 内容分类走真实响应头(端到端) ----
+ *
+ * tb_content_classify(ct, attachment) 在单元层测过,但那条链的前半段从未
+ * 端到端验证:curl 的 header_cb 检出 "attachment" token → op->attachment=1
+ * → on_headers → nav_on_headers → 视图的 is_not_renderable。
+ * 中间任一环坏掉(例如 header_has_token 匹配失败),单元测试照样全绿 ——
+ * 因为它们是直接把 attachment=1 喂进去的。 */
+
+TEST(BrowserApi, ContentDispositionAttachmentIsNotRendered) {
+  HttpServer srv({
+      // 正文是合法 HTML,只有 Content-Disposition 决定它不该被渲染
+      {"/dl", {200, "text/html", "<title>File</title><p>looks like a page</p>",
+                "Content-Disposition: attachment; filename=\"a.html\"\r\n"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/dl").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_EQ(tb_view_not_renderable(v), 1)
+      << "带 attachment 的响应被当页面渲染了 —— 检测链某一环坏了";
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* attachment 判定必须按 token 而不是子串:filename="x-attachment-y" 里
+ * 出现 "attachment" 不该被误判成附件。 */
+TEST(BrowserApi, AttachmentTokenIsNotMatchedAsSubstring) {
+  HttpServer srv({
+      {"/inline", {200, "text/html", "<title>Inline</title><p>page</p>",
+                    "Content-Disposition: inline; filename=\"my-attachment-file.html\"\r\n"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/inline").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_EQ(tb_view_not_renderable(v), 0)
+      << "inline 被误判成 attachment(filename 里含该子串)";
+  EXPECT_STREQ(tb_view_title(v), "Inline");
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* Content-Type 带参数与大小写混写仍应可渲染 —— 真实服务器极常见
+ * (text/html; charset=utf-8、Text/HTML)。 */
+TEST(BrowserApi, ContentTypeParamsAndCaseStillRender) {
+  HttpServer srv({
+      {"/a", {200, "text/html; charset=utf-8", "<title>Params</title><p>x</p>"}},
+      {"/b", {200, "TEXT/HTML", "<title>Upper</title><p>y</p>"}},
+      {"/c", {200, "text/html;charset=UTF-8", "<title>Tight</title><p>z</p>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  const char *paths[] = {"/a", "/b", "/c"};
+  const char *titles[] = {"Params", "Upper", "Tight"};
+  for (int i = 0; i < 3; i++) {
+    ASSERT_EQ(tb_navigate(b, (srv.base() + paths[i]).c_str()).code, 0) << paths[i];
+    ASSERT_EQ(tb_wait_idle(b, 5000), 0) << paths[i];
+    tb_view *v = nullptr;
+    ASSERT_EQ(tb_observe(b, &v).code, 0) << paths[i];
+    EXPECT_EQ(tb_view_not_renderable(v), 0) << paths[i];
+    EXPECT_STREQ(tb_view_title(v), titles[i]) << paths[i];
+    tb_view_free(v);
+  }
+  tb_destroy(b);
+}
+
+/* 不可渲染的响应必须仍然带上状态码与 URL —— TUI 要显示"下载了而不是
+ * 渲染失败",这两个字段就是它唯一的依据。 */
+TEST(BrowserApi, NotRenderableViewCarriesStatusAndUrl) {
+  HttpServer srv({
+      {"/f.bin", {404, "application/octet-stream", "\x00\x01"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/f.bin").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_EQ(tb_view_not_renderable(v), 1);
+  EXPECT_EQ(tb_view_status(v), 404);
+  EXPECT_STREQ(tb_view_not_renderable_type(v), "application/octet-stream");
+  EXPECT_NE(strstr(tb_view_url(v), "/f.bin"), nullptr)
+      << "不可渲染视图丢了 URL,TUI 无法显示落地位置";
+  tb_view_free(v);
+  tb_destroy(b);
+}
