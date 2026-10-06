@@ -126,4 +126,122 @@ t("button form resolves to form's view id", function () {
   eq(btn.form, 1);
 });
 
+/* ================= <textarea> 必须被当成可填控件 =================
+ *
+ * textarea 是**现在**最常见的文本输入控件:Google 搜索框就是
+ * <textarea name="q" rows="1">,不是 <input>。此前 render.js 完全没有
+ * textarea 分支 —— 它既不进 elems(不可见、不可点、不可填),也不进
+ * _tb_form_pairs(填了也不会提交)。实测在 Google 上因此根本没法搜索。
+ */
+
+t("textarea becomes a fillable elem", function () {
+  var r = R("<form action='/s'><textarea name='q' rows='1'></textarea><button>Go</button></form>");
+  /* 记录序:form=1, textarea=2, button=3 */
+  eq(r.elems.length, 3);
+  eq(r.elems[1].type, "input");      // 与 input 同属可填文本控件
+  eq(r.elems[1].name, "q");
+  eq(r.elems[1].value, "");          // 空 textarea 的值是空串
+  var info = JSON.parse(_tb_elem_info(r.elems[1].id));
+  eq(info.tag, "textarea");          // 报真实 tag,不伪装成 input
+  eq(info.type, "textarea");
+});
+
+t("textarea value lives in its content, not in a value attribute", function () {
+  // 与 input 相反:input 的值在 attrs.value,textarea 的值在子文本
+  var r = R("<textarea name='q'>hello world</textarea>");
+  eq(r.elems[0].value, "hello world");
+  var inp = R("<input name='q' value='from attr'>");
+  eq(inp.elems[0].value, "from attr");
+});
+
+t("a filled textarea reports the filled value, not the original content", function () {
+  var d = P.parse("<textarea name='q'>original</textarea>");
+  document._tb_attach(d.root);
+  var r = tb_render_js(d.root, "http://x/", 200);
+  eq(r.elems[0].value, "original");
+  // 模拟 tb_fill 的落点(_tb_set_value 写 __tb_value)
+  _tb_set_value(r.elems[0].id, "typed by user");
+  var r2 = tb_render_js(d.root, "http://x/", 200);
+  eq(r2.elems[0].value, "typed by user");
+});
+
+t("textarea occupies its own line (treated as a block)", function () {
+  // 不当 block 时内容会与前后文本挤在一行,填了值也读不出边界。
+  // 换行数别凭印象数:block-after 加 1 个,而 block-before 只在「不在行首」时
+  // 才加 —— 紧跟在 </p> 的 block-after 之后已经处于行首,故不再加。
+  // 于是 p / textarea / p 三个兄弟 = "before" + \n + "inside" + \n + "after"。
+  var r = R("<p>before</p><textarea name='q'>inside</textarea><p>after</p>");
+  eq(r.text, "before\ninside\nafter");
+  // 真正的对照:非 block 元素后面的文本会**贴在**它后面同一行,
+  // 而 textarea 作为 block 会把它顶到下一行 —— 这才是可读性的差别。
+  eq(R("<p>before</p><span>inside</span>tail").text, "before\ninsidetail");
+  eq(R("<p>before</p><textarea name='q'>inside</textarea>tail").text, "before\ninside\ntail");
+});
+
+t("textarea is collected by _tb_form_pairs (submit carries the value)", function () {
+  var d = P.parse("<form action='/s' method='get'><textarea name='q'>abc</textarea></form>");
+  document._tb_attach(d.root);
+  var r = tb_render_js(d.root, "http://x/", 200);
+  _tb_set_value(r.elems[1].id, "search terms");   // elems[0]=form, [1]=textarea
+  var out = JSON.parse(_tb_form_pairs(r.elems[0].id));
+  eq(out.ok, true);
+  eq(out.pairs.length, 1);
+  eq(out.pairs[0].name, "q");
+  eq(out.pairs[0].value, "search terms");
+});
+
+t("input, textarea and select coexist in one form", function () {
+  var d = P.parse("<form action='/s'>" +
+                  "<input name='a' value='1'>" +
+                  "<textarea name='b'>2</textarea>" +
+                  "<select name='c'><option>x</option></select>" +
+                  "</form>");
+  document._tb_attach(d.root);
+  var r = tb_render_js(d.root, "http://x/", 200);
+  var out = JSON.parse(_tb_form_pairs(r.elems[0].id));
+  var got = [];
+  for (var i = 0; i < out.pairs.length; i++) got.push(out.pairs[i].name + "=" + out.pairs[i].value);
+  eq(got.join(","), "a=1,b=2,c=x");
+});
+
+
+/* ---- _tb_elem_info 的 select/textarea 分支 ----
+ *
+ * 这两个分支此前**完全没有测试**。发现方式很典型:做「破坏 select 默认值」那条
+ * 负控时,把 _tb_elem_info 里一行与 _tb_control_value **完全相同**的
+ * `if (n.tag === "select") {` 误当成后者替换掉了 —— 而测试全绿。
+ * 也就是说这里坏掉了没人知道。这两条把它钉上。
+ */
+t("_tb_elem_info reports a select's options (was untested)", function () {
+  var r = R("<select name='lang'><option>en</option><option>zh</option></select>");
+  var info = JSON.parse(_tb_elem_info(r.elems[0].id));
+  eq(info.tag, "select");
+  eq(info.options.length, 2);
+  eq(info.options[0], "en");
+  eq(info.options[1], "zh");
+});
+
+t("_tb_elem_info options survive optgroup nesting (iterative, not direct children)", function () {
+  // option 常被 optgroup 包住,只看直接子节点会取成整段 textContent
+  // —— 实测过:那样 "en"+"zh" 会拼成 "enzh"
+  var r = R("<select name='l'><optgroup label='g'><option>en</option></optgroup>" +
+            "<optgroup label='h'><option>zh</option></optgroup></select>");
+  var info = JSON.parse(_tb_elem_info(r.elems[0].id));
+  eq(info.options.join(","), "en,zh");
+});
+
+t("_tb_elem_info reports a textarea's current value", function () {
+  var d = P.parse("<textarea name='q'>content here</textarea>");
+  document._tb_attach(d.root);
+  var r = tb_render_js(d.root, "http://x/", 200);
+  var info = JSON.parse(_tb_elem_info(r.elems[0].id));
+  eq(info.tag, "textarea");
+  eq(info.value, "content here");
+  // 填过之后 _tb_elem_info 也要报填的值(视图与交互两条路径必须一致)
+  _tb_set_value(r.elems[0].id, "typed");
+  var info2 = JSON.parse(_tb_elem_info(r.elems[0].id));
+  eq(info2.value, "typed");
+});
+
+
 done();

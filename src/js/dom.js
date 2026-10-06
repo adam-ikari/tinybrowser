@@ -163,6 +163,12 @@ function _tb_elem_info(id) {
   var o = { tag: n.tag };
   if (n.tag === "a") o.href = n.attrs.href || "";
   if (n.tag === "input") o.type = n.attrs.type || "text";
+  if (n.tag === "textarea") {
+    /* Google 搜索框等现代文本控件。报真实 tag(不伪装成 input),由 C 侧
+     * tb_fill 显式接受两者 —— 谎报 tag 会让「这个元素到底是什么」查不出来。 */
+    o.type = "textarea";
+    o.value = _tb_control_value(n);
+  }
   if (n.tag === "button") { o.form = _tb_form_of(n); }
   if (n.tag === "select") {
     o.options = [];
@@ -205,6 +211,35 @@ function _tb_node_by_id(id) {
   return (n && n.type === "element") ? n : null;
 }
 
+/* 控件「当前值」的来源有三样,不能一律读 attrs.value:
+ *   input    → value 属性
+ *   textarea → **子文本**(textarea 没有 value 属性);填过则以 __tb_value 为准
+ *   select   → 首个 option 的文本(HTML 规定 select 的默认值就是第一个 option;
+ *              没有任何 selected 时即是它);选过则以 __tb_value 为准
+ *
+ * 此前一律 `n.attrs.value || ""`,于是 textarea 与 select 提交上去的值恒为空。
+ * Google 搜索框正是 <textarea name="q">,所以搜索词永远发不出去 ——
+ * 实测这正是「在 Google 上搜不了」的直接原因。
+ * __tb_value 优先于一切:用户填/选的值必须压过 DOM 里的默认值。 */
+function _tb_control_value(n) {
+  if (n.__tb_value !== undefined && n.__tb_value !== null) return String(n.__tb_value);
+  if (n.tag === "textarea") return n.textContent;
+  if (n.tag === "select") {
+    // 显式栈按文档序找第一个 option(option 可能被 optgroup 包住)
+    var st = [n];
+    while (st.length) {
+      var x = st.pop();
+      if (x.type === "element" && x.tag === "option") {
+        var fc = x.children.length ? x.children[0] : null;
+        return (fc && fc.type === "text") ? fc.text : "";
+      }
+      for (var k = x.children.length - 1; k >= 0; k--) st.push(x.children[k]);
+    }
+    return "";
+  }
+  return n.attrs.value || "";
+}
+
 /* form 的 action/method。未渲染文档用 getElementById 兜底。 */
 function _tb_form_info(formId) {
   var f = _tb_node_by_id(formId);
@@ -233,12 +268,13 @@ function _tb_form_pairs(formId) {
   var stack = [f];
   while (stack.length) {
     var n = stack.pop();
-    if (n.type === "element" && (n.tag === "input" || n.tag === "select")) {
+    if (n.type === "element" &&
+        (n.tag === "input" || n.tag === "select" || n.tag === "textarea")) {
+      /* textarea 必须一并收:它的值在内容里不在 value 属性里,而现在大量站点
+       * (含 Google 搜索框)用 <textarea name="q">。漏了它,填了值提交时也不带。 */
       var name = n.attrs.name;
       if (name) {
-        var val = n.__tb_value;
-        if (val === undefined || val === null) val = n.attrs.value || "";
-        pairs.push({ id: n.id, name: name, value: String(val) });
+        pairs.push({ id: n.id, name: name, value: _tb_control_value(n) });
       }
     }
     for (var k = n.children.length - 1; k >= 0; k--) stack.push(n.children[k]);

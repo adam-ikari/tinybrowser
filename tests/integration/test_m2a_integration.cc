@@ -1011,3 +1011,148 @@ TEST(BrowserApi, UppercaseAttributesAreLowercased) {
   tb_view_free(v);
   tb_destroy(b);
 }
+
+/* ---- <textarea> 搜索框:现代站点的主流写法,此前完全不可用 ----
+ *
+ * 起因是拿 Google 首页试真实页面时发现的:它的搜索框不是 <input>,而是
+ * <textarea name="q" rows="1">。而 render.js 此前**没有 textarea 分支**,
+ * dom.js 的 _tb_form_pairs 也不收它,于是那个框既不渲染、不可点,填了值
+ * 提交时也不带 —— 在 Google 上根本没法搜索。
+ *
+ * 这几条用本地 fixture 而不是真实站点:真实站点会 A/B 分流、按地域跳转、
+ * 还会在我们请求过多时直接 TLS 拒连(实测已发生),拿它当测试必然是 flaky 的。
+ * fixture 的形状照抄 Google 的:form[action=/search] + textarea[name=q]。 */
+
+TEST(BrowserApi, TextareaSearchBoxIsFillableAndSubmittable) {
+  HttpServer srv({
+      // 形状照抄 Google 首页:搜索框是 textarea,不是 input
+      {"/", {200, "text/html",
+             "<title>Search Home</title>"
+             "<form action=\"/search\" method=\"get\">"
+             "<textarea name=\"q\" rows=\"1\" placeholder=\"Search\"></textarea>"
+             "<input type=\"submit\" value=\"Google Search\">"
+             "</form>"}},
+      {"/search", {200, "text/html",
+                   "<title>Results</title><p>you searched</p>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+
+  /* textarea 必须在视图里,且可识别 —— 此前它根本不出现 */
+  int ta_id = -1, form_id = -1;
+  for (int i = 0; i < tb_view_nelems(v); i++) {
+    struct tb_elem e;
+    if (tb_view_elem(v, i, &e)) continue;
+    if (e.name && strcmp(e.name, "q") == 0) ta_id = e.id;
+    if (form_id < 0 && e.type && strcmp(e.type, "form") == 0) form_id = e.id;
+  }
+  ASSERT_NE(ta_id, -1) << "textarea 没有进入视图,搜索框不可见也不可填";
+  ASSERT_NE(form_id, -1);
+  tb_view_free(v);
+
+  ASSERT_EQ(tb_fill(b, ta_id, "tinybrowser m2a").code, 0);
+  ASSERT_EQ(tb_submit(b, form_id).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_STREQ(tb_view_title(v), "Results");
+  /* 提交出去的 URL 必须真的带上 textarea 里的值。
+   * 空格编成 %20 而非 form-urlencoded 惯用的 + —— 那是既有的 URL 编码选择
+   * (对 input 一样),两条路由对服务端解码结果相同,不在本次范围内改。 */
+  EXPECT_NE(strstr(tb_view_url(v), "q=tinybrowser%20m2a"), nullptr) << tb_view_url(v);
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* 填过的值要出现在视图上,并且重渲不得把它退回 textarea 的原始内容。
+ * 视图 id 是渲染计数器,重渲会重建;靠 __tb_value 记在节点上才跨得过去。 */
+TEST(BrowserApi, FilledTextareaValueSurvivesRerender) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>Fill</title>"
+             "<form action=\"/search\"><textarea name=\"q\">original</textarea></form>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  int ta_id = -1;
+  for (int i = 0; i < tb_view_nelems(v); i++) {
+    struct tb_elem e;
+    if (tb_view_elem(v, i, &e)) continue;
+    if (e.name && strcmp(e.name, "q") == 0) ta_id = e.id;
+  }
+  ASSERT_NE(ta_id, -1);
+  struct tb_elem before;
+  ASSERT_EQ(tb_view_elem(v, 0, &before), 0);
+  tb_view_free(v);
+
+  ASSERT_EQ(tb_fill(b, ta_id, "typed value").code, 0);
+  /* 定时器改 DOM 会触发指纹重渲;这里直接 pump 几轮走同一条重渲路径 */
+  pump_rounds(b, 3, 5);
+
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  int ta_id2 = -1;
+  bool saw_value = false;
+  for (int i = 0; i < tb_view_nelems(v); i++) {
+    struct tb_elem e;
+    if (tb_view_elem(v, i, &e)) continue;
+    if (e.name && strcmp(e.name, "q") == 0) { ta_id2 = e.id; saw_value = (strcmp(e.value, "typed value") == 0); }
+  }
+  EXPECT_NE(ta_id2, -1);
+  EXPECT_TRUE(saw_value) << "填过的 textarea 值在重渲后丢了";
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* select 的默认值此前也是空的:一律读 attrs.value,而 select 没有 value 属性。
+ * HTML 规定 select 的默认选中项是第一个 option —— 修 _tb_control_value 时
+ * 顺带暴露的既有缺口,这里钉住。 */
+TEST(BrowserApi, SelectDefaultsToFirstOption) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>Sel</title>"
+             "<form action=\"/s\"><select name=\"lang\">"
+             "<option value=\"en\">English</option>"
+             "<option value=\"zh\">Chinese</option>"
+             "</select></form>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  int sel_id = -1, form_id = -1;
+  bool default_ok = false;
+  for (int i = 0; i < tb_view_nelems(v); i++) {
+    struct tb_elem e;
+    if (tb_view_elem(v, i, &e)) continue;
+    if (e.type && strcmp(e.type, "select") == 0) { sel_id = e.id; default_ok = (strcmp(e.value, "English") == 0); }
+    if (form_id < 0 && e.type && strcmp(e.type, "form") == 0) form_id = e.id;
+  }
+  EXPECT_NE(sel_id, -1);
+  EXPECT_TRUE(default_ok) << "select 的默认值应是首个 option 的文本";
+  tb_view_free(v);
+
+  /* 选过之后以选中的为准 */
+  ASSERT_EQ(tb_select(b, sel_id, "Chinese").code, 0);
+  ASSERT_EQ(tb_submit(b, form_id).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+  tb_destroy(b);
+}

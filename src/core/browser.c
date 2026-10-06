@@ -281,14 +281,22 @@ static void nav_refresh_view(tb_browser *b) {
   if (b->view->is_not_renderable) return;
 
   char *fp = NULL;
-  /* 指纹取文本长度 + 元素数 + title:足以覆盖绝大多数 DOM 变化,
-     又不至于长到把每次 pump 拖慢。 */
+  /* 指纹取文本长度 + 元素数 + 已填控件的值 + title:足以覆盖绝大多数 DOM 变化,
+     又不至于长到把每次 pump 拖慢。
+     ⚠️ 「已填控件的值」这一项是必需的,不是锦上添花:tb_fill / tb_select 把值记在
+     节点的 __tb_value 上,**不改动任何文本节点**,所以只算文本长度的话指纹压根
+     不变 → 视图不重渲 → 用户填了字段,屏幕上的值还是旧的。实测 textarea 填完
+     读回来仍是原始内容。指纹里必须带值本身(不能只带长度):等长的两个值
+     ("ab" 与 "cd")必须能区分。
+     遍历顺序确定(显式栈、子节点逆序入栈 = 文档序),故拼接结果稳定可比。 */
   static const char FP_EXPR[] =
-      "String(__tb_doc ? (function(){ var n = 0, t = 0, st = [__tb_doc];"
+      "String(__tb_doc ? (function(){ var n = 0, t = 0, fv = '', st = [__tb_doc];"
       " while (st.length) { var x = st.pop();"
       "   if (x.type === 'text') t += x.text.length; else n++;"
+      "   if (x.__tb_value !== undefined && x.__tb_value !== null)"
+      "     fv += x.tag + '=' + x.__tb_value + '\\u0001';"
       "   for (var i = x.children.length - 1; i >= 0; i--) st.push(x.children[i]); }"
-      " return n + ':' + t + ':' + document.title; })() : '')";
+      " return n + ':' + t + ':' + fv.length + ':' + fv + ':' + document.title; })() : '')";
   if (b->engine->eval(b->engine, b->js_doc, FP_EXPR, &fp) != 0 || !fp) {
     free(fp);
     return;
@@ -610,9 +618,12 @@ tb_err tb_fill(tb_browser *b, int id, const char *value) {
   if (!info) { tb_err e = { TB_ERR_NO_ELEM, "element query failed" }; return e; }
   char tag[32] = {0};
   js_json_field(info, "tag", tag, sizeof tag);
-  if (strcmp(tag, "input") != 0) {
+  /* textarea 与 input 同属「可填文本控件」。Google 搜索框等现代站点用的就是
+     <textarea name="q">,此前这里只认 input,于是那个框既不可见(tb_elem_info
+     没有 textarea 分支)也不可填。报的是真实 tag,不在这层做归一。 */
+  if (strcmp(tag, "input") != 0 && strcmp(tag, "textarea") != 0) {
     free(info);
-    tb_err e = { TB_ERR_ARG, "not an input" };
+    tb_err e = { TB_ERR_ARG, "not a fillable text control" };
     return e;
   }
   free(info);

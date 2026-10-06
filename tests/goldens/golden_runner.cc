@@ -70,15 +70,35 @@ int main(int argc, char **argv) {
     tb_free(dump);
 
     if (regenerate) {
+      /* 写失败必须说出来。原先无条件打印 "regenerated",于是 ofstream 打不开
+       * (路径不对/只读目录)时它照样报成功 —— 实测用相对 prefix 运行时
+       * 6 个文件全部「regenerated」而磁盘上 mtime 一动没动,白跑一轮。
+       * 这正是「绿色但没在测」那一类:工具自己骗自己。 */
       std::ofstream out(golden_path, std::ios::binary);
+      if (!out) {
+        std::cerr << name << ": 写不进去 " << golden_path << "\n";
+        failures++;
+        continue;
+      }
       out << got;
-      std::cout << name << ": regenerated\n";
+      out.close();
+      if (!out) {
+        std::cerr << name << ": 写入中断 " << golden_path << "\n";
+        failures++;
+        continue;
+      }
+      std::cout << name << ": regenerated -> " << golden_path << "\n";
       continue;
     }
 
     std::string want = slurp(golden_path);
     if (want.empty()) {
-      std::cerr << name << ": golden file missing or empty (use -u to generate)\n";
+      /* 「missing」与「empty」要分开说,并把路径打出来。合在一句里时,路径写错
+       * 会被误读成「文件该生成」,于是有人去跑 -u —— 而 -u 写的也是同一个错
+       * 路径,于是双方一起绿。实测踩过:相对 prefix 下 6 个 golden 全被判
+       * 「missing or empty」,真正原因是路径解析错了。 */
+      std::cerr << name << ": golden " << (std::ifstream(golden_path) ? "是空的: " : "不存在: ")
+                << golden_path << "\n";
       failures++;
       continue;
     }

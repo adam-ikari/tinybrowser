@@ -8,7 +8,10 @@
 
 var _tb_block = { p:1, div:1, h1:1, h2:1, h3:1, h4:1, h5:1, h6:1, li:1, ul:1, ol:1,
   table:1, tr:1, section:1, article:1, header:1, footer:1, nav:1, aside:1,
-  br:1, hr:1, blockquote:1, pre:1, form:1, select:1, fieldset:1 };
+  br:1, hr:1, blockquote:1, pre:1, form:1, select:1, fieldset:1,
+  /* textarea 是多行控件,内容该独占一行;不当作 block 时它的内容会与前后
+     文本挤在一行里,填了值也读不出边界。 */
+  textarea:1 };
 var _tb_skip = { script:1, style:1, noscript:1, head:1 };
 
 // 视图 id(计数器) → 节点 映射。render 输出 M1 式 id——只给记录的
@@ -47,9 +50,16 @@ function tb_render_js(doc, url, status) {
 
   // add_elem:href/name/value 全部从 attrs 同名取。
   // id 用计数器而非 n.id —— 记录序从 1 连续,golden 逐字节钉住这个编号规则。
+  //
+  // value 走 dom.js 的 _tb_control_value 而非就地读 attrs.value:**两处各算一套
+  // 必然漂移**。实测 textarea 与 select 就因为只在提交侧修了、视图侧仍读
+  // attrs.value,而这两类控件都没有 value 属性 —— 结果是「视图里值是空的、
+  // 提交时却有值」,自相矛盾。定义只有一处,视图与提交不可能不一致。
+  // 依赖加载顺序:dom.js 须先于 render.js 载入(embed_js.cmake 的 GLOB 与
+  // tests/js/lib/bootstrap.js 都是 dom → parser → render)。
   function addElem(type, n) {
     var e = { id: ++nextId, type: type, text: "", href: n.attrs.href || "",
-              name: n.attrs.name || "", value: n.attrs.value || "",
+              name: n.attrs.name || "", value: _tb_control_value(n),
               options: [], off: c.text.length };
     if (type === "select" || type === "form") {
       e.text = "";                                                      // 容器:text 无意义
@@ -93,6 +103,16 @@ function tb_render_js(doc, url, status) {
         addElem((it === "submit" || it === "button" || it === "reset") ? "button" : "input", n);
       } else if (tag === "button") {
         addElem("button", n);
+      } else if (tag === "textarea") {
+        /* textarea 是**现在**最常见的文本输入控件。实测 Google 搜索框是
+         * <textarea name="q" rows="1">,不是 <input> —— 此前完全不记 elem,
+         * 于是搜索框既不可见也不可填,在 Google 上根本没法搜索。
+         * 现代站点大量这么写(可自增高、可换行),不算冷门。
+         * elem 类型记 "input":交互层(tb_fill → _tb_set_value → __tb_value)
+         * 对两者是同一条路径,类型归一省得每处都判两遍。 */
+        addElem("input", n);
+        /* 值不在这里算 —— addElem 已统一走 dom.js 的 _tb_control_value。
+           就地再算一份就是「视图侧与提交侧各说一套」的来源。 */
       } else if (tag === "select") {
         addElem("select", n);
         curSel = c.elems.length - 1;                                   // elem 下标
