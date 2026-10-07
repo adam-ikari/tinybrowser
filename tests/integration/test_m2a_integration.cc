@@ -1156,3 +1156,127 @@ TEST(BrowserApi, SelectDefaultsToFirstOption) {
   ASSERT_EQ(tb_wait_idle(b, 5000), 0);
   tb_destroy(b);
 }
+
+/* ---- 页面脚本自己建表单:document.forms / 具名访问 / .value / submit() ----
+ *
+ * Google 首页有一部分变体的搜索表单是 JS 动态建的(静态 HTML 里没有 form)。
+ * 此前 document.forms 不存在、form.q 取不到、el.value 不存在,脚本一上来
+ * 就断,表单根本建不起来。这条用**页面脚本自己建表单**的 fixture 覆盖整条链:
+ * document.forms → 建 form → 具名访问 → .value → form.submit() → 宿主导航。
+ */
+
+TEST(BrowserApi, ScriptBuiltFormNavigatesViaFormSubmit) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>Dynamic Form</title>"
+             "<div id=mount></div>"
+             "<script>"
+             "var f = document.createElement('form');"
+             "  f.setAttribute('action', '/search');"
+             "  f.setAttribute('method', 'get');"
+             "  var q = document.createElement('input');"
+             "  q.setAttribute('name', 'q');"
+             "  q.value = 'built by script';"
+             "  f.appendChild(q);"
+             "  document.getElementById('mount').appendChild(f);"
+             "  /* 走一遍:document.forms + 具名访问 + .value */"
+             "  window.__found = document.forms.length === 1"
+             "    && document.forms[0].q.value === 'built by script';"
+             "  document.forms[0].submit();"
+             "</script>"}},
+      {"/search", {200, "text/html",
+                   "<title>Dynamic Results</title><p>landed</p>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+  pump_rounds(b, 3, 5);
+
+  char *out = nullptr;
+  ASSERT_EQ(tb_eval_js(b, "String(window.__found)", &out).code, 0);
+  EXPECT_STREQ(out, "true") << "document.forms / 具名访问 / .value 这条链有问题: " << out;
+  free(out);
+  /* form.submit() 的 nav 指令在前面的 pump 里已被 drain 取出并 tb_navigate(异步):
+   * 必须等导航+加载完成,observe 才看得到 /search。__found 已在此前 eval 读出,
+   * 导航后新文档会重置 window,故 wait_idle 必须放在 eval 之后。 */
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  /* form.submit() 经导航指令通道把宿主带到了 /search?q=... */
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_STREQ(tb_view_title(v), "Dynamic Results") << "url=" << tb_view_url(v);
+  EXPECT_NE(strstr(tb_view_url(v), "q=built%20by%20script"), nullptr) << tb_view_url(v);
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* 脚本填的值必须真的进提交 —— 这条钉的是 element.value 的访问器。
+ * 没有访问器时 f.q.value = "x" 会变成与 attrs 无关的普通属性,
+ * 提交出去的还是页面原值,且不报任何错。 */
+TEST(BrowserApi, ScriptAssignedValueReachesTheWire) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>Assign</title>"
+             "<form action=\"/echo\" method=\"get\">"
+             "<input name=\"q\" value=\"original\">"
+             "</form>"
+             "<script>"
+             "document.forms[0].q.value = 'assigned by script';"
+             "</script>"}},
+      {"/echo", {200, "text/html", "<title>Echo</title><p>done</p>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  tb_view *v = nullptr;
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  int form_id = -1;
+  for (int i = 0; i < tb_view_nelems(v); i++) {
+    struct tb_elem e;
+    if (tb_view_elem(v, i, &e)) continue;
+    if (form_id < 0 && e.type && strcmp(e.type, "form") == 0) form_id = e.id;
+  }
+  ASSERT_NE(form_id, -1);
+  tb_view_free(v);
+
+  ASSERT_EQ(tb_submit(b, form_id).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+  ASSERT_EQ(tb_observe(b, &v).code, 0);
+  EXPECT_NE(strstr(tb_view_url(v), "q=assigned%20by%20script"), nullptr) << tb_view_url(v);
+  tb_view_free(v);
+  tb_destroy(b);
+}
+
+/* tagName 按规范大写。此前是小写,而同一节点新加的 nodeName 是大写 ——
+ * 同一个属性对两种大小写,比只错一个更糟。 */
+TEST(BrowserApi, TagNameIsUppercaseLikeBrowsers) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>TagName</title>"
+             "<div id=probe>text</div>"
+             "<script>"
+             "var d = document.getElementById('probe');"
+             "window.__tn = d.tagName + '|' + d.nodeName + '|' + d.nodeType"
+             "   + '|' + (d instanceof Node) + '|' + (d instanceof Element);"
+             "</script>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  char *out = nullptr;
+  ASSERT_EQ(tb_eval_js(b, "String(window.__tn)", &out).code, 0);
+  EXPECT_STREQ(out, "DIV|DIV|1|true|true") << out;
+  free(out);
+  tb_destroy(b);
+}
