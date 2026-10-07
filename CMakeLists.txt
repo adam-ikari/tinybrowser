@@ -25,8 +25,8 @@ set(QZ_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(QZ_BUILD_CLI      OFF CACHE BOOL "" FORCE)
 set(QZ_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(QZ_BUILD_DEBUGGER OFF CACHE BOOL "" FORCE)
-# QZ_PROFILE=minimal 是关掉 WebAssembly 引擎(wamr/wasm3)的档位。浏览器不跑 wasm,
-# 且本仓库不初始化 wamr/wasm3 子模块(见 deps/VERSIONS.md)。
+# QZ_PROFILE=minimal 默认关 WebAssembly;此处显式 QZ_WITH_WAMR=ON 启用之。minimal
+# 的 profile-switch 块因 QZ_PROFILE_LAST 预置相同而不再执行,故本 cache 值生效。
 set(QZ_PROFILE "minimal" CACHE STRING "" FORCE)
 # ⚠️ 关键:把 QZ_PROFILE_LAST 预置成与 QZ_PROFILE 相同,qzjs 的 profile-switch 块
 # (deps/qzjs/CMakeLists.txt:169 `if(NOT QZ_PROFILE_LAST STREQUAL _qz_profile)`)
@@ -43,8 +43,9 @@ set(QZ_WITH_TLS        ON  CACHE BOOL "" FORCE)  # 浏览器必须能开 https �
 set(QZ_WITH_CRYPTO_EXT ON  CACHE BOOL "" FORCE)  # TLS 依赖 crypto(TLS 会强制它,显式写清)
 set(QZ_WITH_COMPRESS   ON  CACHE BOOL "" FORCE)
 set(QZ_WITH_TEXTCODEC  ON  CACHE BOOL "" FORCE)
-set(QZ_WITH_WAMR       OFF CACHE BOOL "" FORCE)  # 不跑 wasm,且未初始化该子模块
+set(QZ_WITH_WAMR       ON  CACHE BOOL "" FORCE)  # 启用 WebAssembly(wamr):页面 JS 可用 WebAssembly API
 set(QZ_WITH_WASM3      OFF CACHE BOOL "" FORCE)
+set(WAMR_BUILD_SIMD 0 CACHE BOOL "" FORCE)  # 关 wasm SIMD(默认开):wamr 它会在 FAST_INTERP 下 FetchContent 拉 simde(header-only,网络不稳必挂);小 wasm 模块不需要 SIMD
 
 add_subdirectory(deps/qzjs)
 

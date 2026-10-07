@@ -1280,3 +1280,34 @@ TEST(BrowserApi, TagNameIsUppercaseLikeBrowsers) {
   free(out);
   tb_destroy(b);
 }
+
+/* WebAssembly:启用 QZ_WITH_WAMR 后页面 JS 可用 WebAssembly API。
+ * 用同步 new Module/Instance 路径(避开 Promise/microtask 时机),实例化一个
+ * add(a,b) 模块并调用,断言结果。字节码是最小有效 wasm:
+ *   (module (func (export "add") (param i32 i32) (result i32) local.get 0 local.get 1 i32.add))
+ * SIMD 关了(QZ 侧 WAMR_BUILD_SIMD=0),但 add 不需要 SIMD。 */
+TEST(BrowserApi, WebAssemblyInstantiateRunsExports) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>Wasm</title><div id=m></div>"
+             "<script>"
+             "var wb = new Uint8Array([0,97,115,109,1,0,0,0,1,7,1,96,2,127,127,"
+             "1,127,3,2,1,0,7,7,1,3,97,100,100,0,0,10,9,1,7,0,32,0,32,1,106,11]);"
+             "var wm = new WebAssembly.Module(wb);"
+             "var wi = new WebAssembly.Instance(wm);"
+             "window.__wasm = wi.exports.add(2, 3);"
+             "</script>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  char *out = nullptr;
+  ASSERT_EQ(tb_eval_js(b, "String(window.__wasm)", &out).code, 0);
+  EXPECT_STREQ(out, "5") << "wamr 实例化 add(2,3) 应得 5;当前: " << out;
+  free(out);
+  tb_destroy(b);
+}
