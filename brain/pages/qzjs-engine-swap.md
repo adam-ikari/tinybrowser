@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [js, qzjs, quickjs, engine, submodule]
 created: "2026-10-04T14:05:26"
-updated: "2026-10-06T09:54:13"
+updated: "2026-10-07T06:14:28"
 ---
 
 <!-- compiled_truth -->
@@ -30,7 +30,7 @@ updated: "2026-10-06T04:27:03"
 - 因此「宿主直接拿到 `JSContext*` 同步 eval」这条路**默认不存在**——JSContext 归 qzjs 线程独占。
 
 ## 定案一:子模块(从自己 GitHub 克隆)
-- `deps/qzjs` → `https://github.com/adam-ikari/qzjs.git`,现钉在 master `2020a598`(2026-10-06 更新,8 个提交:PR #8~#15 全部合入)。
+- `deps/qzjs` → `https://github.com/adam-ikari/qzjs.git`,现钉在 master `5fe3413d`(2026-10-07 更新,4 个提交;deps/quickjs-ng 迁移到独立仓库 adam-ikari/qzvm,指针 04af3f5f)。
 - shallow clone(`--depth 1`)。qzjs 自身还有 8 个嵌套子模块;只初始化 4 个:
   `quickjs-ng` / `libuv` / `miniz` / `mbedtls`。
 - **故意不初始化**:`wamr`(体量最大)、`wasm3`、`lz4`(仅 `QZ_POLYFILL_MODE=compressed` 需要,默认 `rodata`)、`googletest`。
@@ -422,4 +422,16 @@ updated: "2026-10-06T04:27:03"
   kind: decision
   summary: "qzjs 指针更新到 master 2020a598(PR #8~#15);issue #5(CA 注入点)已被上游解决;PR #2 交叉构建评审点因上游 Linux-only 范围决定而作废"
   source: "M2a:更新 qzjs 依赖"
+  affects: [qzjs-engine-swap]
+
+- time: 2026-10-07T06:08:50
+  kind: note
+  summary: "qzjs 推进到 master 5fe3413d:deps/quickjs-ng 迁移到独立仓库 adam-ikari/qzvm(指针 6d46d07→04af3f5f);bc-reader/GC-SEGV/drain-jobs 补丁迁入 qzvm 源码,本地 dirty 已丢弃;qzjs.h 公共 API 零变化;libuv gitlink 不变;155/155 全绿"
+  source: "deps/qzjs@5fe3413d"
+  affects: [qzjs-engine-swap]
+
+- time: 2026-10-07T06:14:28
+  kind: decision
+  summary: "compiled_truth 指针更新到 5fe3413d:quickjs-ng 子模块迁移到独立仓库 qzvm"
+  source: "deps/qzjs@5fe3413d"
   affects: [qzjs-engine-swap]
