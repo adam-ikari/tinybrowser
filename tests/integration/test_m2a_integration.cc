@@ -1311,3 +1311,64 @@ TEST(BrowserApi, WebAssemblyInstantiateRunsExports) {
   free(out);
   tb_destroy(b);
 }
+
+/* 复杂页面综合验证:模拟现代站点(嵌套表单 + 外部 script + wasm + 动态 DOM +
+ * CSS)。断言加载、脚本、wasm、表单访问全部正常,且无任何 console 报错——
+ * 复杂页面最怕的就是「加载出来但一路报错」。 */
+TEST(BrowserApi, ComplexModernPageLoadsCleanly) {
+  HttpServer srv({
+      {"/", {200, "text/html",
+             "<title>Complex</title>"
+              "<style>.x{color:red}</style>"
+              "<body>"
+             "<form id=f action=/search method=get>"
+             "<input name=q value=hi>"
+             "<select name=s><option>a</option><option selected>b</option></select>"
+             "<textarea name=t>note</textarea>"
+             "</form>"
+             "<script src=/app.js></script>"
+             "<script>"
+             "var wb = new Uint8Array([0,97,115,109,1,0,0,0,1,7,1,96,2,127,127,"
+             "1,127,3,2,1,0,7,7,1,3,97,100,100,0,0,10,9,1,7,0,32,0,32,1,106,11]);"
+             "var wm = new WebAssembly.Module(wb);"
+             "var wi = new WebAssembly.Instance(wm);"
+             "window.__wasm = wi.exports.add(3, 4);"
+             "var d = document.createElement('div'); d.id='dynamic'; document.body.appendChild(d);"
+             "window.__hasForm = document.forms.length === 1"
+             "  && document.forms.f.q.value === 'hi'"
+             "  && document.forms.f.s.value === 'b'"
+             "  && document.forms.f.t.value === 'note';"
+              "</script></body>"}},
+      {"/app.js", {200, "application/javascript",
+             "window.__ext = document.getElementById('f').tagName;"}},
+      {"/search", {200, "text/html", "<title>R</title>"}},
+  });
+  ConsoleCapture cc;
+  tb_browser *b = make_browser(&cc);
+  ASSERT_NE(b, nullptr);
+
+  ASSERT_EQ(tb_navigate(b, (srv.base() + "/").c_str()).code, 0);
+  ASSERT_EQ(tb_wait_idle(b, 5000), 0);
+
+  char *out = nullptr;
+  ASSERT_EQ(tb_eval_js(b, "String(window.__ext)", &out).code, 0);
+  EXPECT_STREQ(out, "FORM") << "外部 script 应已执行: " << out;
+  free(out); out = nullptr;
+
+  ASSERT_EQ(tb_eval_js(b, "String(window.__wasm)", &out).code, 0);
+  EXPECT_STREQ(out, "7") << "wasm add(3,4) 应得 7: " << out;
+  free(out); out = nullptr;
+
+  ASSERT_EQ(tb_eval_js(b, "document.getElementById('dynamic') != null", &out).code, 0);
+  EXPECT_STREQ(out, "true") << "脚本动态建的元素应存在: " << out;
+  free(out); out = nullptr;
+
+  ASSERT_EQ(tb_eval_js(b, "String(window.__hasForm)", &out).code, 0);
+  EXPECT_STREQ(out, "true") << "具名表单/具名访问/.value 链: " << out;
+  free(out); out = nullptr;
+
+  EXPECT_TRUE(cc.lines.empty()) << "复杂页面不应有任何 console 报错, 收到 "
+                                << cc.lines.size() << " 条, 首条: "
+                                << (cc.lines.empty() ? std::string() : cc.lines[0]);
+  tb_destroy(b);
+}

@@ -480,8 +480,8 @@ function _tb_node_by_id(id) {
 /* 控件「当前值」的来源有三样,不能一律读 attrs.value:
  *   input    → value 属性
  *   textarea → **子文本**(textarea 没有 value 属性);填过则以 __tb_value 为准
- *   select   → 首个 option 的文本(HTML 规定 select 的默认值就是第一个 option;
- *              没有任何 selected 时即是它);选过则以 __tb_value 为准
+ *   select   → 首个带 selected 的 option 的文本(无任何 selected 时取第一个
+ *              option,即 HTML 默认值);选过则以 __tb_value 为准
  *
  * 此前一律 `n.attrs.value || ""`,于是 textarea 与 select 提交上去的值恒为空。
  * Google 搜索框正是 <textarea name="q">,所以搜索词永远发不出去 ——
@@ -491,15 +491,22 @@ function _tb_control_value(n) {
   if (n.__tb_value !== undefined && n.__tb_value !== null) return String(n.__tb_value);
   if (n.tag === "textarea") return n.textContent;
   if (n.tag === "select") {
-    // 显式栈按文档序找第一个 option(option 可能被 optgroup 包住)
+    // 显式栈按文档序收集 option:首个带 selected 的生效,否则第一个
+    // (option 可能被 optgroup 包住,故遍历整棵子树而非只看直接子节点)
+    var first = null, chosen = null;
     var st = [n];
     while (st.length) {
       var x = st.pop();
       if (x.type === "element" && x.tag === "option") {
-        var fc = x.children.length ? x.children[0] : null;
-        return (fc && fc.type === "text") ? fc.text : "";
+        if (!first) first = x;
+        if (x.attrs.selected !== undefined && !chosen) chosen = x;
       }
       for (var k = x.children.length - 1; k >= 0; k--) st.push(x.children[k]);
+    }
+    var pick = chosen || first;
+    if (pick) {
+      var fc = pick.children.length ? pick.children[0] : null;
+      return (fc && fc.type === "text") ? fc.text : "";
     }
     return "";
   }

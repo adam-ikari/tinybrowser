@@ -263,6 +263,15 @@ t("element.value is an accessor, not a plain own property", function () {
   eq(_tb_form_query(f), "q=typed&note=new%20note&lang=en");
 });
 
+t("select.value prefers a selected option over the first", function () {
+  doc('<form action=/s><select name=lang><option>a</option><option selected>b</option>' +
+      '<option>c</option></select></form>');
+  eq(document.forms[0].lang.value, "b");
+  // 无 selected 时仍回落第一个 option
+  doc('<form action=/s><select name=lang><option>x</option><option>y</option></select></form>');
+  eq(document.forms[0].lang.value, "x");
+});
+
 t("setAttribute('value') still works and is overridden by an explicit fill", function () {
   doc('<form action=/s><input name=q value=a></form>');
   var f = document.forms[0];
