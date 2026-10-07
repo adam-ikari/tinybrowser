@@ -5,7 +5,7 @@ category: decision
 status: active
 tags: [js, qzjs, quickjs, engine, submodule]
 created: "2026-10-04T14:05:26"
-updated: "2026-10-07T06:14:28"
+updated: "2026-10-07T07:45:33"
 ---
 
 <!-- compiled_truth -->
@@ -434,4 +434,10 @@ updated: "2026-10-06T04:27:03"
   kind: decision
   summary: "compiled_truth 指针更新到 5fe3413d:quickjs-ng 子模块迁移到独立仓库 qzvm"
   source: "deps/qzjs@5fe3413d"
+  affects: [qzjs-engine-swap]
+
+- time: 2026-10-07T07:45:33
+  kind: reversal
+  summary: "推翻「浏览器不跑 wasm」:启用 QZ_WITH_WAMR=ON,页面 JS 可用 WebAssembly API(Module/Instance/validate/instantiate)。集成测试 add(i32,i32)->i32 模块实例化+调用 add(2,3)=5 通过,156/156 全绿。WAMR_BUILD_SIMD=0 避免 FAST_INTERP 下 FetchContent 拉 simde(网络不稳必挂)。wamr 子模块需 git submodule update --init deps/qzjs/deps/wamr(本地用 /home/gem/project/qzjs/deps/wamr 副本绕过 clone 失败)。"
+  source: "CMakeLists.txt QZ_WITH_WAMR;test_m2a_integration WebAssemblyInstantiateRunsExports"
   affects: [qzjs-engine-swap]
