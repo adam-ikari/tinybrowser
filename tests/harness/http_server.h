@@ -9,7 +9,14 @@
 class HttpServer {
 public:
   // routes: path -> {status, content_type, body}
-  struct Route { int status; std::string content_type; std::string body; };
+  // extra_headers: 原样附加的响应头,每条以 \r\n 结尾(如 "Set-Cookie: a=1\r\n")。
+  //   cookie 测试要靠它发 Set-Cookie;为空时行为与从前一致。
+  struct Route {
+    int status;
+    std::string content_type;
+    std::string body;
+    std::string extra_headers;
+  };
   explicit HttpServer(const std::map<std::string, Route> &routes);
   ~HttpServer();
   HttpServer(const HttpServer &) = delete;

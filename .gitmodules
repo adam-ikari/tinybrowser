@@ -1,0 +1,3 @@
+[submodule "deps/qzjs"]
+	path = deps/qzjs
+	url = https://github.com/adam-ikari/qzjs.git

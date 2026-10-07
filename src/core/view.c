@@ -15,6 +15,11 @@ tb_view *tb_view_new(void) {
   return calloc(1, sizeof(tb_view));
 }
 
+/* tb_elem 的所有 char* 字段(含 type)都归 tb_view_free 所有,生产者必须
+ * strdup。历史上 type 例外 —— render.c 的 add_elem 直接赋字符串字面量,
+ * 于是谁都不释放它。引擎驱动后 js_engine_render 从 JSON 取 type 必须
+ * strdup,若不改这里就按元素泄漏(ASAN: 5 bytes/元素)。现在两条路径统一
+ * 由 view 拥有 type,契约只有一条,不会再走偏。 */
 void tb_view_free(tb_view *v) {
   if (!v) return;
   free(v->url);
@@ -23,6 +28,7 @@ void tb_view_free(tb_view *v) {
   free(v->not_renderable_type);
   for (int i = 0; i < v->nelems; i++) {
     struct tb_elem *e = &v->elems[i];
+    free((void *)e->type);
     free((void *)e->text);
     free((void *)e->href);
     free((void *)e->name);
@@ -50,7 +56,8 @@ tb_view *tb_view_clone(const tb_view *v) {
       const struct tb_elem *s = &v->elems[i];
       struct tb_elem *t = &c->elems[i];
       t->id = s->id;
-      t->type = s->type;  /* type 是字符串字面量,不拥有 */
+      t->type = dup(s->type);   /* type 由 view 拥有,clone 必须深拷贝 */
+      t->off = s->off;
       t->text = dup(s->text);
       t->href = dup(s->href);
       t->name = dup(s->name);

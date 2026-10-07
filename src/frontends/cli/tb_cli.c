@@ -3,6 +3,7 @@
 #define _DEFAULT_SOURCE
 #include "tb.h"          /* 先于 termbox2:避免其 #define TB_OK 污染 tb.h 同名枚举 */
 #include "termbox2.h"
+#include "hint.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,13 +12,15 @@
    顶栏: URL  status  title
    中部: 可滚动文本视图(正文)
    底栏: 元素列表(0-based 索引  type text)  + 模式行
-   模式: BROWSE(浏览) CMD(: 命令/URL) SEARCH(/ 页内搜索) INPUT(填充输入框)
+   模式: BROWSE(浏览) HINT(f 键 vimium 提示) CMD(: 命令/URL) SEARCH(/ 页内搜索) INPUT(填充输入框)
    按键(BROWSE): ↑↓/jk 滚动  g/G 首/尾  PgUp/PgDn 翻页  Home/End 首/尾
                  Space 翻页  Tab 下移焦点  0-9 数字直达  Enter 激活(link/button/input)
-                 ←→ 切换 select 选项  i 填充 input  : 命令  / 搜索  q/Ctrl+Q/Ctrl+C 退出
+                 ←→ 切换 select 选项  i 填充 input  f 呼出 hint  : 命令  / 搜索
+                 q/Ctrl+Q/Ctrl+C 退出
+   HINT: a-z 激活元素(两字母分两步)  Backspace 回退  Esc 退出
    命令(:): q/quit 退出  b/back 后退  f/forward 前进  r/reload 重载,其余视为 URL */
 
-enum { MODE_BROWSE, MODE_CMD, MODE_SEARCH, MODE_INPUT };
+enum { MODE_BROWSE, MODE_CMD, MODE_SEARCH, MODE_INPUT, MODE_HINT };
 
 static int scroll_top = 0, focus = -1;   /* focus: -1=正文,>=0=元素索引 */
 static tb_browser *g_b;
@@ -27,6 +30,10 @@ static char prompt_buf[256];
 static int prompt_len;
 static char search_str[128];
 static int search_str_len;
+static int hint_n;            /* 进入 HINT 时的可点元素总数 */
+static int hint_elems[676];   /* 可点元素在 g_v 中的索引(序号 k → hint = tb_hint_keys(hint_n,k)) */
+static char hint_prefix[3] = {0};   /* 已输前缀(最长 2,显式零初始化) */
+static int hint_prefix_len;
 
 static void enter_mode(int m);
 static void run_command(void);
@@ -36,6 +43,7 @@ static const char *mode_name(void) {
     case MODE_CMD:    return "CMD";
     case MODE_SEARCH: return "SEARCH";
     case MODE_INPUT:  return "INPUT";
+    case MODE_HINT:   return "HINT";
     default:          return "BROWSE";
   }
 }
@@ -59,6 +67,7 @@ static void refresh_view(void) {
   scroll_top = 0;
   search_str_len = 0;
   search_str[0] = '\0';
+  if (mode == MODE_HINT) enter_mode(MODE_BROWSE);
 }
 
 static void navigate(const char *url) {
@@ -147,6 +156,25 @@ static void redraw(void) {
     p = nl + 1;
   }
 
+  /* HINT 覆盖:在可点元素文本起点叠加提示键位 */
+  if (mode == MODE_HINT && text != NULL) {
+    for (int k = 0; k < hint_n; k++) {
+      char h[4] = {0};
+      size_t hn = tb_hint_keys((size_t)hint_n, (size_t)k, h, sizeof h);
+      if ((int)hn <= hint_prefix_len) continue;              /* 前缀已覆盖全部(将激活) */
+      if (strncmp(h, hint_prefix, (size_t)hint_prefix_len) != 0) continue;  /* 非当前候选 */
+      struct tb_elem e;
+      if (tb_view_elem(g_v, hint_elems[k], &e)) continue;
+      int erow, ecol;
+      tb_off_to_pos(text, e.off, &erow, &ecol);
+      if (erow < scroll_top || erow > scroll_top + visible - 1) continue;   /* 可见区外 */
+      int sy = 2 + (erow - scroll_top);
+      int rem = (int)hn - hint_prefix_len;
+      for (int j = 0; j < rem && ecol + hint_prefix_len + j < w; j++)
+        tb_set_cell(ecol + hint_prefix_len + j, sy, h[hint_prefix_len + j], TB_YELLOW, 0);
+    }
+  }
+
   /* 底栏元素(0-based 索引) */
   if (focus >= nelems) focus = nelems ? nelems - 1 : -1;
   for (int i = 0; i < nelems && i < elem_rows; i++) {
@@ -161,7 +189,9 @@ static void redraw(void) {
   /* 模式行 */
   if (mode == MODE_BROWSE) {
     tb_printf(0, h - 1, TB_GREEN, 0,
-              "q退出  :命令  /搜索  j/k滚动  Tab/数字选元素  Enter激活");
+              "q退出  :命令  /搜索  j/k滚动  Tab/数字选元素  Enter激活  f提示");
+  } else if (mode == MODE_HINT) {
+    tb_printf(0, h - 1, TB_GREEN, 0, "hint: %s_  (Esc退出  Backspace回退)", hint_prefix);
   } else {
     char mprefix = (mode == MODE_SEARCH) ? '/' : (mode == MODE_INPUT) ? '>' : ':';
     tb_printf(0, h - 1, TB_GREEN, 0, "%c%s_", mprefix, prompt_buf);
@@ -172,16 +202,43 @@ static void redraw(void) {
 
 /* ---- 交互动作 ---- */
 
-static void activate_focused(void) {
-  if (focus < 0 || !g_v) return;
+/* 激活元素(link/button 导航;input 进 INPUT;select 聚焦回 BROWSE) */
+static void activate_elem(int idx) {
+  if (idx < 0 || !g_v) return;
   struct tb_elem e;
-  if (tb_view_elem(g_v, focus, &e)) return;
+  if (tb_view_elem(g_v, idx, &e)) return;
   if (strcmp(e.type, "link") == 0 || strcmp(e.type, "button") == 0) {
     tb_click(g_b, e.id);             /* 内部做相对 href 解析;button 自动提交所属表单 */
-    refresh_view();
+    refresh_view();                  /* refresh_view 内部退出 HINT */
   } else if (strcmp(e.type, "input") == 0) {
+    focus = idx;
     enter_mode(MODE_INPUT);
+  } else if (strcmp(e.type, "select") == 0) {
+    focus = idx;
+    enter_mode(MODE_BROWSE);
   }
+}
+
+static void activate_focused(void) {
+  activate_elem(focus);
+}
+
+/* 收集全部可点元素;无可点元素则不进入 HINT */
+static void enter_hint(void) {
+  if (!g_v) return;
+  int n = tb_view_nelems(g_v);
+  hint_n = 0;
+  for (int i = 0; i < n && hint_n < 676; i++) {
+    struct tb_elem e;
+    if (tb_view_elem(g_v, i, &e)) continue;
+    if (strcmp(e.type, "link") == 0 || strcmp(e.type, "button") == 0 ||
+        strcmp(e.type, "input") == 0 || strcmp(e.type, "select") == 0)
+      hint_elems[hint_n++] = i;
+  }
+  if (hint_n == 0) return;   /* 无可点元素,无操作 */
+  hint_prefix_len = 0;
+  hint_prefix[0] = '\0';   /* 清残留前缀,避免模式行显示陈旧字符 */
+  mode = MODE_HINT;
 }
 
 /* select 切换选项;dir=±1 下一个/上一个(循环) */
@@ -240,6 +297,7 @@ static void browse_key(struct tb_event *ev) {
   if (ev->key == TB_KEY_CTRL_Q || ev->key == TB_KEY_CTRL_C) exit(0);
   else if (ev->ch == 'q') exit(0);
   else if (ev->ch == ':') enter_mode(MODE_CMD);
+  else if (ev->ch == 'f') enter_hint();
   else if (ev->ch == '/') enter_mode(MODE_SEARCH);
   else if (ev->ch == 'j' || ev->key == TB_KEY_ARROW_DOWN) scroll_top++;
   else if (ev->ch == 'k' || ev->key == TB_KEY_ARROW_UP) scroll_top = scroll_top > 0 ? scroll_top - 1 : 0;
@@ -262,6 +320,40 @@ static void browse_key(struct tb_event *ev) {
   else if (ev->key == TB_KEY_ENTER) activate_focused();
   else if (ev->ch == 'h' || ev->key == TB_KEY_ARROW_LEFT) cycle_select(-1);
   else if (ev->ch == 'l' || ev->key == TB_KEY_ARROW_RIGHT) cycle_select(1);
+}
+
+/* ---- HINT 模式 ---- */
+
+static void hint_key(struct tb_event *ev) {
+  if (ev->key == TB_KEY_ESC) { enter_mode(MODE_BROWSE); return; }
+  if (ev->key == TB_KEY_BACKSPACE || ev->key == TB_KEY_BACKSPACE2) {
+    if (hint_prefix_len > 0) hint_prefix_len--;
+    hint_prefix[hint_prefix_len] = '\0';   /* 截短后补终止符,模式行不显示陈旧字符 */
+    return;
+  }
+  if (ev->ch < 'a' || ev->ch > 'z') return;
+  char np[4]; int len = 0;
+  if (hint_prefix_len > 0) np[len++] = hint_prefix[0];
+  if (hint_prefix_len > 1) np[len++] = hint_prefix[1];
+  np[len++] = (char)ev->ch;
+  np[len] = '\0';
+  /* 唯一精确匹配(hint == 输入) → 激活 */
+  for (int k = 0; k < hint_n; k++) {
+    char h[4] = {0};
+    size_t hn = tb_hint_keys((size_t)hint_n, (size_t)k, h, sizeof h);
+    if ((int)hn == len && strncmp(h, np, (size_t)len) == 0) { activate_elem(hint_elems[k]); return; }
+  }
+  /* 无前缀延伸候选 → 忽略 */
+  int any = 0;
+  for (int k = 0; k < hint_n; k++) {
+    char h[4] = {0};
+    size_t hn = tb_hint_keys((size_t)hint_n, (size_t)k, h, sizeof h);
+    if ((int)hn >= len && strncmp(h, np, (size_t)len) == 0) { any = 1; break; }
+  }
+  if (!any) return;
+  hint_prefix[0] = np[0];
+  hint_prefix[1] = np[1];
+  hint_prefix_len = len;
 }
 
 static void cmd_key(struct tb_event *ev) {
@@ -336,18 +428,51 @@ int main(int argc, char **argv) {
         if (mode == MODE_CMD) cmd_key(&ev);
         else if (mode == MODE_SEARCH) search_key(&ev);
         else if (mode == MODE_INPUT) input_key(&ev);
+        else if (mode == MODE_HINT) hint_key(&ev);
         else browse_key(&ev);
         break;
       case TB_EVENT_MOUSE:
-        if (ev.key == TB_KEY_MOUSE_LEFT && mode == MODE_BROWSE && g_v) {
-          /* 点击底栏元素区 → 选中;再点已选中项 → 激活 */
+        if ((ev.key == TB_KEY_MOUSE_WHEEL_UP || ev.key == TB_KEY_MOUSE_WHEEL_DOWN) &&
+            (mode == MODE_BROWSE || mode == MODE_HINT)) {
+          scroll_top += (ev.key == TB_KEY_MOUSE_WHEEL_DOWN) ? 1 : -1;   /* redraw 内钳制 */
+        } else if (ev.key == TB_KEY_MOUSE_LEFT && mode == MODE_BROWSE && g_v) {
+          /* 点击底栏元素区 → 选中;再点已选中项 → 激活。
+             元素列表浮动在正文之后(与 redraw 相同公式):
+             elem_top = 2 + clamp(正文总行数 - scroll_top, 0, visible)。 */
           int nelems = tb_view_nelems(g_v);
           int elem_rows = nelems < 5 ? nelems : 5;
-          int elem_top = tb_height() - 3 - elem_rows;
+          int hgt = tb_height();
+          int body_bottom = hgt - 3 - elem_rows;
+          if (body_bottom < 3) body_bottom = 3;
+          const char *text = tb_view_text(g_v);
+          int total = count_lines(text);
+          int visible = body_bottom - 2 + 1;
+          int rendered = total - scroll_top;
+          if (rendered < 0) rendered = 0;
+          if (rendered > visible) rendered = visible;
+          int elem_top = 2 + rendered;
           if (ev.y >= elem_top && ev.y < elem_top + elem_rows) {
             int idx = ev.y - elem_top;
             if (idx == focus) activate_focused();
             else focus = idx;
+          } else if (ev.y >= 2 && ev.y < elem_top) {
+            /* 正文点击命中:屏幕行列 → 文档行列 → 字节偏移 */
+            int row = scroll_top + (ev.y - 2);
+            size_t pos = tb_pos_to_off(text, row, ev.x);
+            int hit = -1;
+            for (int i = 0; i < nelems; i++) {
+              struct tb_elem e;
+              if (tb_view_elem(g_v, i, &e)) continue;
+              const char *t = e.type;
+              if (strcmp(t, "link") != 0 && strcmp(t, "button") != 0 &&
+                  strcmp(t, "input") != 0) continue;
+              int erow;
+              tb_off_to_pos(text, e.off, &erow, NULL);
+              if (erow != row) continue;
+              size_t elen = e.text ? strlen(e.text) : 0;
+              if (e.off <= pos && pos < e.off + elen) { hit = i; break; }
+            }
+            if (hit >= 0) activate_elem(hit);
           }
         }
         break;

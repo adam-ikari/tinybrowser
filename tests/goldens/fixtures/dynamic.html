@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<title>Dynamic</title>
+<script>
+  document.title = "ByScript";
+  var el = document.createElement("p");
+  el.textContent = "injected";
+  document.body.appendChild(el);
+</script>
+<body><p>static</p></body>

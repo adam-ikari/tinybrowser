@@ -33,11 +33,16 @@ typedef struct tb_transport_req {
   const char *url;
   const char *body;         /* POST body,NULL 表示空 */
   const char *content_type; /* 请求 Content-Type(表单 urlencoded 等),可 NULL */
+  const char *cookie;       /* 请求 Cookie 头值,NULL 表示不带 */
   /* 响应回调:全部在宿主线程、poll 期间同步触发。
      本设计约定:on_headers/on_body/on_done 在同一瞬间(传输完成时)依次触发,
      M1 实现统一在完成点派发。 */
   void (*on_headers)(void *ud, int status, const char *content_type,
                      int attachment, const char *final_url);
+  /* 逐条 Set-Cookie 原值(未解析、未拼接)。可以为 NULL —— 传输层不实现
+     cookie 时忽略即可,tinybrowser 自己就是可选地支持。
+     一个响应可能有多条,故是逐条回调而不是数组参数。 */
+  void (*on_set_cookie)(void *ud, const char *set_cookie_value);
   void (*on_body)(void *ud, const char *data, size_t len);
   void (*on_done)(void *ud, tb_err err);
   void *ud;
@@ -47,6 +52,17 @@ struct tb_transport {
   void *(*open)(const tb_transport *self, const tb_transport_req *req); /* 返回 op 句柄 */
   void (*cancel)(const tb_transport *self, void *op);
   void (*poll)(const tb_transport *self);   /* 推进传输;回调在内部触发 */
+  /* 释放传输自身持有的资源,可为 NULL(不持有任何需释放的东西)。
+   *
+   * tb_destroy 只在「传输由 tb_create 自己创建」时调用它 —— 也就是
+   * cfg.transport == NULL、tb_create 顺带建了默认 curl transport 的那条路。
+   * 调用方注入的 transport(cfg.transport 非 NULL)归调用方所有,browser
+   * 不碰其生命周期,因此也不会调它的 destroy。
+   *
+   * 存在的理由:curl_multi_handle() 会建一个内部连接池 easy handle,
+   * 此前没有任何地方调 curl_multi_cleanup(),长跑进程(或反复
+   * create/destroy 的测试)会持续累积。 */
+  void (*destroy)(const tb_transport *self);
 };
 
 typedef struct tb_clock {
@@ -54,6 +70,22 @@ typedef struct tb_clock {
 } tb_clock;
 
 extern const tb_clock tb_clock_real;
+
+/* ---- JS 引擎 seam(M2a) ---- */
+struct tb_view;   /* 前置声明:render 成员的类型须与 view.h 的 struct tb_view 一致 */
+struct tb_js_engine {
+  void *(*open)(const struct tb_js_engine *self, struct tb_browser *host);   /* 修正①:传 host 而非 cfg,支持 __tb_load_sync nested pump */
+  /* 载入文档。base_url 是该文档的最终 URL(重定向后),用于按 HTML 语义解析
+     <script src> 等相对引用;可为 NULL(此时只接受绝对 URL)。
+     修正③:原签名没有 base,导致 <script src="/a.js"> 这类相对引用无法解析。 */
+  int   (*load_document)(const struct tb_js_engine *self, void *h, const char *body, size_t len,
+                         const char *base_url);
+  int   (*render)(const struct tb_js_engine *self, void *h, const char *url, int status, struct tb_view *out);  /* 修正②:带 url/status,与 M1 tb_render 对齐 */
+  int   (*eval)(const struct tb_js_engine *self, void *h, const char *code, char **out);  /* *out = malloc,调用方 free */
+  void  (*poll_timers)(const struct tb_js_engine *self, void *h);
+  void  (*close)(const struct tb_js_engine *self, void *h);
+};
+const struct tb_js_engine *tb_default_js_engine(void);
 
 /* ---- 公共 API ---- */
 
@@ -74,6 +106,9 @@ typedef struct tb_config {
   const tb_transport *transport; /* NULL → 真实 curl 传输 */
   const tb_clock *clock;         /* NULL → tb_clock_real */
   void *ud;
+  uint32_t js_exec_ms_limit;            /* 单脚本执行毫秒上限(控制面回执窗口);0=默认 5000 */
+  void (*on_console)(tb_browser *, const char *level, const char *msg, void *ud);
+  const struct tb_js_engine *js_engine; /* NULL → 默认 quickjs engine */
 } tb_config;
 
 /* 视图(不透明;访问器见下) */
@@ -99,10 +134,13 @@ int tb_wait_idle(tb_browser *b, uint32_t timeout_ms);  /* 0=空闲,1=超时未�
 int tb_pump(tb_browser *b, uint32_t timeout_ms);       /* 0=空闲,1=仍忙 */
 void tb_free(void *p);
 
+tb_err tb_eval_js(tb_browser *b, const char *code, char **out); /* *out = malloc,调用方 free */
+
 struct tb_elem {
   int id;
   const char *type;   /* "link"|"button"|"input"|"select"|"form" */
   const char *text;
+  size_t off;         /* 元素文本在 v->text 中的起始字节偏移(vimium hint/鼠标命中用) */
   const char *href;   /* link */
   const char *name;   /* input/select */
   const char *value;  /* input 当前值 / select 已选项 */

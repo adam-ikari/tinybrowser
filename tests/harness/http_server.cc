@@ -117,13 +117,34 @@ void HttpServer::run() {
       close(c);
       continue;
     }
+    // 回显请求的 Cookie 头当作正文。cookie 测试需要断言「浏览器实际发了什么」,
+    // 而不只是「jar 里有什么」—— 这两者之间的连线只有真发一次请求才验证得到。
+    if (path == "/echo-cookie") {
+      std::string ck;
+      header_value(req, "Cookie", ck);
+      respond(c, 200, "OK", "text/plain", ck, "");
+      close(c);
+      continue;
+    }
     auto it = routes_.find(path);
+    if (it == routes_.end()) {
+      /* 查表先按完整 path(含 query)。找不到再退到「去掉 query 的 path」。
+       * 表单提交必然带 query —— GET 是 "/search?q=foo",POST 是
+       * "/search?"(body 在别处)。若只支持精确匹配,每条表单测试都得把查询串
+       * 的编码(%20 还是 +、参数顺序)硬编进 fixture,那样测试钉的是 URL 编码
+       * 而不是「提交对不对」,一旦编码细节调整就假性变红。
+       * 精确匹配优先,所以想断言某个具体 query 的测试仍可注册全路径。
+       * ⚠️ 代价:注册在无 query 路径上的 route 会吞掉该路径的**所有** query。
+       * 需要断言查询内容的测试请自己看 tb_view_url(),别依赖这条兜底。 */
+      std::string bare = path.substr(0, path.find('?'));
+      it = routes_.find(bare);
+    }
     if (it == routes_.end()) {
       respond(c, 404, "Not Found", "text/plain", "not found", "");
     } else {
       const Route &r = it->second;
       respond(c, r.status, r.status == 200 ? "OK" : "Status", r.content_type,
-              r.body, "");
+              r.body, r.extra_headers);
     }
     close(c);
   }
